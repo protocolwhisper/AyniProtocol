@@ -17,6 +17,7 @@ contract AyniProtocolTest is TestBase {
 
     MockERC20 internal collateral;
     MockERC20 internal usdc;
+    MockERC20 internal usdt;
     MockAggregatorV3 internal feed;
     AyniOracle internal oracle;
     AyniVault internal implementation;
@@ -26,6 +27,7 @@ contract AyniProtocolTest is TestBase {
     function setUp() public {
         collateral = new MockERC20("Collateral", "COL", 18);
         usdc = new MockERC20("USD Coin", "USDC", 6);
+        usdt = new MockERC20("Tether USD", "USDT", 6);
 
         feed = new MockAggregatorV3(8);
         feed.setRoundData(1, 2_000e8, block.timestamp, 1);
@@ -33,13 +35,13 @@ contract AyniProtocolTest is TestBase {
         oracle = new AyniOracle(address(feed), address(this));
         implementation = new AyniVault();
         registry = new AyniVaultRegistry(address(this));
-        factory = new AyniVaultFactory(address(implementation), address(registry), address(usdc), address(this));
+        factory = new AyniVaultFactory(address(implementation), address(registry), address(this));
 
         registry.set_factory(address(factory));
     }
 
     function test_create_vault_registers_metadata() public {
-        address vaultAddress = factory.create_vault(address(collateral), address(oracle), VAULT_OWNER);
+        address vaultAddress = factory.create_vault(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
 
         (
             uint256 id,
@@ -56,12 +58,21 @@ contract AyniProtocolTest is TestBase {
         assertEq(oracleAddress, address(oracle));
         assertEq(vaultOwner, VAULT_OWNER);
         assertTrue(active);
-        assertEq(registry.vault_for_collateral(address(collateral)), vaultAddress);
+        assertEq(registry.get_vault(address(collateral), address(usdc)), vaultAddress);
         assertTrue(registry.is_registered(vaultAddress));
     }
 
+    function test_same_collateral_supports_multiple_debt_assets() public {
+        address usdcVault = factory.create_vault(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        address usdtVault = factory.create_vault(address(collateral), address(usdt), address(oracle), VAULT_OWNER);
+
+        assertTrue(usdcVault != usdtVault);
+        assertEq(registry.get_vault(address(collateral), address(usdc)), usdcVault);
+        assertEq(registry.get_vault(address(collateral), address(usdt)), usdtVault);
+    }
+
     function test_vault_borrow_sends_usdc_and_accrues_interest() public {
-        address vaultAddress = factory.create_vault(address(collateral), address(oracle), VAULT_OWNER);
+        address vaultAddress = factory.create_vault(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
@@ -101,13 +112,13 @@ contract AyniProtocolTest is TestBase {
         AyniOracle localOracle = new AyniOracle(address(localFeed), address(this));
         AyniVault localImplementation = new AyniVault();
         AyniVaultRegistry localRegistry = new AyniVaultRegistry(address(this));
-        AyniVaultFactory localFactory = new AyniVaultFactory(
-            address(localImplementation), address(localRegistry), address(debtToken), address(this)
-        );
+        AyniVaultFactory localFactory =
+            new AyniVaultFactory(address(localImplementation), address(localRegistry), address(this));
 
         localRegistry.set_factory(address(localFactory));
 
-        address vaultAddress = localFactory.create_vault(address(collateralToken), address(localOracle), VAULT_OWNER);
+        address vaultAddress =
+            localFactory.create_vault(address(collateralToken), address(debtToken), address(localOracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
 
         collateralToken.mint(USER, 2e8);
@@ -124,7 +135,7 @@ contract AyniProtocolTest is TestBase {
     }
 
     function test_vault_risk_updates_are_delayed() public {
-        address vaultAddress = factory.create_vault(address(collateral), address(oracle), VAULT_OWNER);
+        address vaultAddress = factory.create_vault(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
 
         vm.prank(VAULT_OWNER);
@@ -158,7 +169,7 @@ contract AyniProtocolTest is TestBase {
     }
 
     function test_pause_blocks_new_deposits() public {
-        address vaultAddress = factory.create_vault(address(collateral), address(oracle), VAULT_OWNER);
+        address vaultAddress = factory.create_vault(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
 
         collateral.mint(USER, COLLATERAL_AMOUNT);

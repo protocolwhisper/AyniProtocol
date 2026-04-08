@@ -10,7 +10,7 @@ contract AyniVaultRegistry {
     struct VaultMetadata {
         uint256 id;
         address collateral_token;
-        address usdc;
+        address debt_asset;
         address oracle;
         address vault_owner;
         bool active;
@@ -18,7 +18,7 @@ contract AyniVaultRegistry {
 
     mapping(address => VaultMetadata) private vault_metadata;
     mapping(uint256 => address) public vault_by_id;
-    mapping(address => address) public vault_for_collateral;
+    mapping(bytes32 => address) public vault_for_market;
     mapping(address => bool) public is_registered;
 
     event FactoryUpdated(address factory);
@@ -26,7 +26,7 @@ contract AyniVaultRegistry {
         uint256 indexed id,
         address indexed vault,
         address indexed collateral_token,
-        address usdc,
+        address debt_asset,
         address oracle,
         address vault_owner
     );
@@ -49,36 +49,41 @@ contract AyniVaultRegistry {
         emit FactoryUpdated(factory_);
     }
 
-    function register_vault(address vault, address collateral_token, address usdc, address oracle, address vault_owner)
-        external
-    {
+    function register_vault(
+        address vault,
+        address collateral_token,
+        address debt_asset,
+        address oracle,
+        address vault_owner
+    ) external {
         require(factory != address(0), "Registry: factory not set");
         require(msg.sender == factory, "Registry: not factory");
         require(vault != address(0), "Registry: bad vault");
         require(collateral_token != address(0), "Registry: bad collateral");
-        require(usdc != address(0), "Registry: bad usdc");
+        require(debt_asset != address(0), "Registry: bad debt asset");
         require(oracle != address(0), "Registry: bad oracle");
         require(vault_owner != address(0), "Registry: bad vault owner");
         require(!is_registered[vault], "Registry: already registered");
-        require(vault_for_collateral[collateral_token] == address(0), "Registry: collateral exists");
+        bytes32 market_key = _marketKey(collateral_token, debt_asset);
+        require(vault_for_market[market_key] == address(0), "Registry: market exists");
 
         vault_count += 1;
         uint256 vault_id = vault_count;
 
         is_registered[vault] = true;
         vault_by_id[vault_id] = vault;
-        vault_for_collateral[collateral_token] = vault;
+        vault_for_market[market_key] = vault;
 
         vault_metadata[vault] = VaultMetadata({
             id: vault_id,
             collateral_token: collateral_token,
-            usdc: usdc,
+            debt_asset: debt_asset,
             oracle: oracle,
             vault_owner: vault_owner,
             active: true
         });
 
-        emit VaultRegistered(vault_id, vault, collateral_token, usdc, oracle, vault_owner);
+        emit VaultRegistered(vault_id, vault, collateral_token, debt_asset, oracle, vault_owner);
     }
 
     function set_vault_active(address vault, bool active) external {
@@ -86,18 +91,22 @@ contract AyniVaultRegistry {
         require(is_registered[vault], "Registry: unknown vault");
 
         VaultMetadata storage meta = vault_metadata[vault];
-        address collateral_token = meta.collateral_token;
+        bytes32 market_key = _marketKey(meta.collateral_token, meta.debt_asset);
 
         if (active) {
-            address current_vault = vault_for_collateral[collateral_token];
-            require(current_vault == address(0) || current_vault == vault, "Registry: collateral taken");
-            vault_for_collateral[collateral_token] = vault;
-        } else if (vault_for_collateral[collateral_token] == vault) {
-            vault_for_collateral[collateral_token] = address(0);
+            address current_vault = vault_for_market[market_key];
+            require(current_vault == address(0) || current_vault == vault, "Registry: market taken");
+            vault_for_market[market_key] = vault;
+        } else if (vault_for_market[market_key] == vault) {
+            vault_for_market[market_key] = address(0);
         }
 
         meta.active = active;
         emit VaultStatusUpdated(vault, active);
+    }
+
+    function get_vault(address collateral_token, address debt_asset) external view returns (address) {
+        return vault_for_market[_marketKey(collateral_token, debt_asset)];
     }
 
     function get_vault_metadata(address vault)
@@ -108,6 +117,10 @@ contract AyniVaultRegistry {
         require(is_registered[vault], "Registry: unknown vault");
 
         VaultMetadata memory meta = vault_metadata[vault];
-        return (meta.id, meta.collateral_token, meta.usdc, meta.oracle, meta.vault_owner, meta.active);
+        return (meta.id, meta.collateral_token, meta.debt_asset, meta.oracle, meta.vault_owner, meta.active);
+    }
+
+    function _marketKey(address collateral_token, address debt_asset) internal pure returns (bytes32) {
+        return keccak256(abi.encode(collateral_token, debt_asset));
     }
 }
