@@ -10,9 +10,11 @@ contract AyniVaultFactory {
 
     address public vault_blueprint;
     address public registry;
+    address public manager;
 
     event BlueprintUpdated(address blueprint);
     event RegistryUpdated(address registry);
+    event ManagerUpdated(address manager);
     event VaultCreated(
         address indexed vault, address indexed collateral_token, address debt_asset, address oracle, address vault_owner
     );
@@ -31,6 +33,14 @@ contract AyniVaultFactory {
 
     function admin() external view returns (address) {
         return _owner;
+    }
+
+    function set_manager(address manager_) external {
+        require(msg.sender == _owner, "Factory: not owner");
+        require(manager_ != address(0), "Factory: bad manager");
+
+        manager = manager_;
+        emit ManagerUpdated(manager_);
     }
 
     function set_vault_blueprint(address vault_blueprint_) external {
@@ -55,7 +65,7 @@ contract AyniVaultFactory {
         external
         returns (address vault)
     {
-        require(msg.sender == _owner, "Factory: not owner");
+        require(msg.sender == _owner || msg.sender == manager, "Factory: not owner");
         require(vault_blueprint != address(0), "Factory: blueprint not set");
         require(registry != address(0), "Factory: registry not set");
         require(collateral_token != address(0), "Factory: bad collateral");
@@ -65,7 +75,8 @@ contract AyniVaultFactory {
         require(vault_owner != address(0), "Factory: bad vault owner");
 
         vault = Clones.clone(vault_blueprint);
-        IAyniVault(vault).initialize(collateral_token, debt_asset, oracle, vault_owner);
+        IAyniVault(vault)
+            .initialize(collateral_token, debt_asset, oracle, vault_owner, manager == address(0) ? _owner : manager);
 
         IAyniVaultRegistry(registry).register_vault(vault, collateral_token, debt_asset, oracle, vault_owner);
 
@@ -79,7 +90,7 @@ contract AyniVaultFactory {
         address vault_owner,
         bytes32 salt
     ) external returns (address vault) {
-        require(msg.sender == _owner, "Factory: not owner");
+        require(msg.sender == _owner || msg.sender == manager, "Factory: not owner");
         require(vault_blueprint != address(0), "Factory: blueprint not set");
         require(registry != address(0), "Factory: registry not set");
         require(collateral_token != address(0), "Factory: bad collateral");
@@ -89,7 +100,8 @@ contract AyniVaultFactory {
         require(vault_owner != address(0), "Factory: bad vault owner");
 
         vault = Clones.cloneDeterministic(vault_blueprint, salt);
-        IAyniVault(vault).initialize(collateral_token, debt_asset, oracle, vault_owner);
+        IAyniVault(vault)
+            .initialize(collateral_token, debt_asset, oracle, vault_owner, manager == address(0) ? _owner : manager);
 
         IAyniVaultRegistry(registry).register_vault(vault, collateral_token, debt_asset, oracle, vault_owner);
 

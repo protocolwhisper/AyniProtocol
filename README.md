@@ -18,3 +18,25 @@ Solidity + Foundry version of the protocol contracts.
 forge build
 forge test
 ```
+
+## Deploy
+
+Deploy the core stack:
+
+```bash
+forge script script/DeployProtocol.s.sol:DeployProtocol \
+  --sig "run(address)" $OWNER \
+  --rpc-url $RPC_URL \
+  --account $ACCOUNT \
+  --broadcast
+```
+
+Deploy a test stack with mock USDC and mock USDT markets for one collateral:
+
+```bash
+forge script script/DeployProtocol.s.sol:DeployProtocol \
+  --sig "runWithMockDebts(address,address,address,uint256)" $OWNER $COLLATERAL $FEED 10000000000 \
+  --rpc-url $RPC_URL \
+  --account $ACCOUNT \
+  --broadcast
+```

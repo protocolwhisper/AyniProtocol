@@ -29,6 +29,32 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     event Unpaused(address by);
     event RiskParameterUpdateScheduled(bytes32 indexed parameter, uint256 new_value, uint256 execute_after);
     event RiskParameterUpdated(bytes32 indexed parameter, uint256 old_value, uint256 new_value);
+    event SolverBorrowOpened(
+        bytes32 indexed order_id,
+        address indexed borrower,
+        uint256 principal,
+        uint256 debt_amount,
+        uint256 protocol_fee_bps,
+        uint256 expiry
+    );
+    event SolverBorrowCancelled(bytes32 indexed order_id, address indexed borrower);
+    event SolverBorrowFilled(bytes32 indexed order_id, address indexed borrower, uint256 filled_at);
+    event ClaimAccountingRepaid(bytes32 indexed order_id, address indexed borrower, uint256 amount);
+    event ClaimAccountingLiquidated(
+        bytes32 indexed order_id,
+        address indexed borrower,
+        uint256 claim_proceeds,
+        uint256 protocol_proceeds
+    );
+
+    enum SolverBorrowStatus {
+        NONE,
+        OPEN,
+        FILLED,
+        CANCELLED,
+        REPAID,
+        LIQUIDATED
+    }
 
     struct Position {
         uint256 collateral;
@@ -41,10 +67,21 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         uint256 execute_after;
     }
 
+    struct SolverBorrowOrder {
+        address borrower;
+        uint256 principal;
+        uint256 debt_amount;
+        uint256 protocol_fee_bps;
+        uint256 expiry;
+        uint256 filled_at;
+        SolverBorrowStatus status;
+    }
+
     address private _collateral_token;
     address private _usdc;
     address private _oracle;
     address private _owner;
+    address private _router;
     bool private _initialized;
 
     uint8 public collateral_decimals;
@@ -63,6 +100,9 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     uint256 public total_debt;
 
     mapping(address => Position) public positions;
+    mapping(address => bytes32) public active_solver_order;
+
+    mapping(bytes32 => SolverBorrowOrder) private _solver_orders;
 
     PendingUintChange private _pending_max_ltv;
     PendingUintChange private _pending_liq_threshold;
@@ -82,12 +122,17 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         _;
     }
 
+    modifier onlyRouter() {
+        require(msg.sender == _router, "Vault: not router");
+        _;
+    }
+
     constructor() {
         _initialized = true;
         _disableReentrancyGuard();
     }
 
-    function initialize(address collateral_token_, address usdc_, address oracle_, address owner_)
+    function initialize(address collateral_token_, address usdc_, address oracle_, address owner_, address router_)
         external
         initializer
     {
@@ -95,6 +140,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         require(usdc_ != address(0), "Vault: bad usdc");
         require(oracle_ != address(0), "Vault: bad oracle");
         require(owner_ != address(0), "Vault: bad owner");
+        require(router_ != address(0), "Vault: bad router");
 
         _initializeReentrancyGuard();
 
@@ -102,6 +148,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         _usdc = usdc_;
         _oracle = oracle_;
         _owner = owner_;
+        _router = router_;
         collateral_decimals = _readTokenDecimals(collateral_token_);
         debt_decimals = _readTokenDecimals(usdc_);
         oracle_decimals = _readOracleDecimals(oracle_);
@@ -148,44 +195,243 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     }
 
     function record_borrow(uint256 amount) external nonReentrant {
+        _borrow(msg.sender, amount);
+    }
+
+    function deposit_for(address user, uint256 amount) external nonReentrant onlyRouter {
+        _deposit(user, amount);
+    }
+
+    function withdraw_for(address user, uint256 amount) external nonReentrant onlyRouter {
+        _withdraw(user, amount);
+    }
+
+    function borrow_for(address user, uint256 amount) external nonReentrant onlyRouter {
+        _borrow(user, amount);
+    }
+
+    function repay_for(address user, uint256 amount) external nonReentrant onlyRouter {
+        _repay(user, amount);
+    }
+
+    function repay(uint256 amount) external nonReentrant {
+        _repay(msg.sender, amount);
+    }
+
+    function open_solver_borrow_for(
+        bytes32 order_id,
+        address user,
+        uint256 principal,
+        uint256 debt_amount,
+        uint256 expiry,
+        uint256 protocol_fee_bps_
+    ) external nonReentrant onlyRouter {
         require(!paused, "Vault: paused");
+        require(order_id != bytes32(0), "Vault: bad order");
+        require(principal > 0, "amount=0");
+        require(expiry > block.timestamp, "Vault: bad expiry");
+        require(active_solver_order[user] == bytes32(0), "Vault: solver order active");
+
+        _accrue(user);
+
+        require(positions[user].debt == 0, "Vault: existing debt");
+        require(_collateral_usd(user) > 0, "no collateral");
+        require(_health_factor_after(positions[user].collateral, debt_amount) >= MIN_HEALTH_FACTOR, "exceeds max LTV");
+
+        active_solver_order[user] = order_id;
+        _solver_orders[order_id] = SolverBorrowOrder({
+            borrower: user,
+            principal: principal,
+            debt_amount: debt_amount,
+            protocol_fee_bps: protocol_fee_bps_,
+            expiry: expiry,
+            filled_at: 0,
+            status: SolverBorrowStatus.OPEN
+        });
+
+        emit SolverBorrowOpened(order_id, user, principal, debt_amount, protocol_fee_bps_, expiry);
+    }
+
+    function cancel_solver_borrow_for(bytes32 order_id, address user) external nonReentrant onlyRouter {
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        require(order.borrower == user, "Vault: bad borrower");
+        require(order.status == SolverBorrowStatus.OPEN, "Vault: bad order");
+
+        order.status = SolverBorrowStatus.CANCELLED;
+        active_solver_order[user] = bytes32(0);
+
+        emit SolverBorrowCancelled(order_id, user);
+    }
+
+    function mark_solver_borrow_filled(bytes32 order_id) external nonReentrant onlyRouter {
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        require(order.status == SolverBorrowStatus.OPEN, "Vault: bad order");
+        require(block.timestamp <= order.expiry, "Vault: order expired");
+
+        address borrower = order.borrower;
+        _accrue(borrower);
+
+        require(active_solver_order[borrower] == order_id, "Vault: inactive order");
+        require(positions[borrower].debt == 0, "Vault: existing debt");
+        require(_health_factor_after(positions[borrower].collateral, order.debt_amount) >= MIN_HEALTH_FACTOR, "would undercollateralize");
+
+        positions[borrower].debt = order.debt_amount;
+        total_debt += order.debt_amount;
+        order.status = SolverBorrowStatus.FILLED;
+        order.filled_at = block.timestamp;
+
+        emit BorrowRecorded(borrower, order.principal, order.debt_amount - order.principal);
+        emit SolverBorrowFilled(order_id, borrower, order.filled_at);
+    }
+
+    function repay_claim_for(bytes32 order_id, address user, uint256 amount)
+        external
+        nonReentrant
+        onlyRouter
+        returns (uint256 actual)
+    {
         require(amount > 0, "amount=0");
 
-        _accrue(msg.sender);
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        require(order.borrower == user, "Vault: bad borrower");
+        require(order.status == SolverBorrowStatus.FILLED, "Vault: bad order");
+
+        _accrue(user);
+
+        actual = _min(amount, positions[user].debt);
+        require(actual > 0, "no debt");
+
+        positions[user].debt -= actual;
+        total_debt -= actual;
+
+        if (positions[user].debt == 0) {
+            order.status = SolverBorrowStatus.REPAID;
+            active_solver_order[user] = bytes32(0);
+        }
+
+        emit Repay(user, actual);
+        emit ClaimAccountingRepaid(order_id, user, actual);
+    }
+
+    function liquidate_claim_for(bytes32 order_id, address claim_holder_, address treasury_)
+        external
+        nonReentrant
+        onlyRouter
+        returns (uint256 claim_proceeds, uint256 protocol_proceeds)
+    {
+        require(claim_holder_ != address(0), "Vault: bad claim holder");
+        require(treasury_ != address(0), "Vault: bad treasury");
+
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        require(order.status == SolverBorrowStatus.FILLED, "Vault: bad order");
+
+        address borrower = order.borrower;
+        _accrue(borrower);
+
+        require(_health_factor(borrower) < MIN_HEALTH_FACTOR, "position healthy");
+
+        uint256 debt_covered = positions[borrower].debt;
+        uint256 collateral_amount = positions[borrower].collateral;
+
+        positions[borrower].debt = 0;
+        positions[borrower].collateral = 0;
+        total_debt -= debt_covered;
+        total_collateral -= collateral_amount;
+        active_solver_order[borrower] = bytes32(0);
+        order.status = SolverBorrowStatus.LIQUIDATED;
+
+        protocol_proceeds = collateral_amount * order.protocol_fee_bps / BPS_DENOMINATOR;
+        claim_proceeds = collateral_amount - protocol_proceeds;
+
+        if (protocol_proceeds > 0) {
+            require(IERC20(_collateral_token).transfer(treasury_, protocol_proceeds), "protocol collateral transfer failed");
+        }
+
+        require(IERC20(_collateral_token).transfer(claim_holder_, claim_proceeds), "claim collateral transfer failed");
+
+        emit Liquidated(borrower, claim_holder_, claim_proceeds, debt_covered);
+        emit ClaimAccountingLiquidated(order_id, borrower, claim_proceeds, protocol_proceeds);
+    }
+
+    function _deposit(address user, uint256 amount) internal {
+        require(!paused, "Vault: paused");
+        require(amount >= min_collateral, "below minimum");
+
+        _accrue(user);
+
+        positions[user].collateral += amount;
+        total_collateral += amount;
+
+        require(IERC20(_collateral_token).transferFrom(user, address(this), amount), "deposit transfer failed");
+
+        emit Deposit(user, amount);
+    }
+
+    function _withdraw(address user, uint256 amount) internal {
+        require(amount > 0, "amount=0");
+        require(!_has_pending_solver_order(user), "Vault: pending solver borrow");
+
+        _accrue(user);
+
+        uint256 new_collateral = positions[user].collateral - amount;
+        require(
+            _health_factor_after(new_collateral, positions[user].debt) >= MIN_HEALTH_FACTOR, "would undercollateralize"
+        );
+
+        positions[user].collateral = new_collateral;
+        total_collateral -= amount;
+
+        require(IERC20(_collateral_token).transfer(user, amount), "withdraw transfer failed");
+
+        emit Withdraw(user, amount);
+    }
+
+    function _borrow(address user, uint256 amount) internal {
+        require(!paused, "Vault: paused");
+        require(amount > 0, "amount=0");
+        require(active_solver_order[user] == bytes32(0), "Vault: solver order active");
+
+        _accrue(user);
 
         uint256 fee = amount * borrow_fee_bps / BPS_DENOMINATOR;
-        uint256 new_debt = positions[msg.sender].debt + amount + fee;
-        uint256 col_usd = _collateral_usd(msg.sender);
+        uint256 new_debt = positions[user].debt + amount + fee;
+        uint256 col_usd = _collateral_usd(user);
 
         require(col_usd > 0, "no collateral");
         require(new_debt * BPS_DENOMINATOR <= col_usd * max_ltv, "exceeds max LTV");
         require(IERC20(_usdc).balanceOf(address(this)) >= amount, "insufficient liquidity");
 
-        positions[msg.sender].debt = new_debt;
+        positions[user].debt = new_debt;
         total_debt += amount + fee;
-        require(IERC20(_usdc).transfer(msg.sender, amount), "borrow transfer failed");
+        require(IERC20(_usdc).transfer(user, amount), "borrow transfer failed");
 
-        emit BorrowRecorded(msg.sender, amount, fee);
+        emit BorrowRecorded(user, amount, fee);
     }
 
-    function repay(uint256 amount) external nonReentrant {
+    function _repay(address user, uint256 amount) internal {
         require(amount > 0, "amount=0");
 
-        _accrue(msg.sender);
+        bytes32 order_id = active_solver_order[user];
+        if (order_id != bytes32(0) && _solver_orders[order_id].status == SolverBorrowStatus.FILLED) {
+            revert("Vault: use claim repay");
+        }
 
-        uint256 actual = _min(amount, positions[msg.sender].debt);
+        _accrue(user);
+
+        uint256 actual = _min(amount, positions[user].debt);
         require(actual > 0, "no debt");
 
-        positions[msg.sender].debt -= actual;
+        positions[user].debt -= actual;
         total_debt -= actual;
 
-        require(IERC20(_usdc).transferFrom(msg.sender, address(this), actual), "repay transfer failed");
+        require(IERC20(_usdc).transferFrom(user, address(this), actual), "repay transfer failed");
 
-        emit Repay(msg.sender, actual);
+        emit Repay(user, actual);
     }
 
     function liquidate(address user, uint256 debt_to_cover) external nonReentrant {
         require(user != msg.sender, "self liquidation");
+        require(active_solver_order[user] == bytes32(0), "Vault: claim-backed debt");
 
         _accrue(user);
 
@@ -223,6 +469,10 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         return _owner;
     }
 
+    function protocol_router() external view returns (address) {
+        return _router;
+    }
+
     function health_factor(address user) external view returns (uint256) {
         return _health_factor(user);
     }
@@ -244,6 +494,31 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
     function available_liquidity() external view returns (uint256) {
         return IERC20(_usdc).balanceOf(address(this));
+    }
+
+    function solver_order(bytes32 order_id)
+        external
+        view
+        returns (
+            address borrower,
+            uint256 principal,
+            uint256 debt_amount,
+            uint256 protocol_fee_bps_,
+            uint256 expiry,
+            uint256 filled_at,
+            uint8 status
+        )
+    {
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        return (
+            order.borrower,
+            order.principal,
+            order.debt_amount,
+            order.protocol_fee_bps,
+            order.expiry,
+            order.filled_at,
+            uint8(order.status)
+        );
     }
 
     function set_max_ltv(uint256 v) external onlyOwner {
@@ -430,6 +705,16 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         }
 
         return 10 ** uint256(decimals_ - 2);
+    }
+
+    function _has_pending_solver_order(address user) internal view returns (bool) {
+        bytes32 order_id = active_solver_order[user];
+
+        if (order_id == bytes32(0)) {
+            return false;
+        }
+
+        return _solver_orders[order_id].status == SolverBorrowStatus.OPEN;
     }
 
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {
