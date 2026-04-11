@@ -33,7 +33,9 @@ interface IAyniVaultActions {
 
     function mark_solver_borrow_filled(bytes32 order_id) external;
 
-    function repay_claim_for(bytes32 order_id, address user, uint256 amount) external returns (uint256 actual);
+    function repay_claim_for(bytes32 order_id, address user, uint256 amount)
+        external
+        returns (uint256 actual, uint256 remaining_debt);
 
     function liquidate_claim_for(bytes32 order_id, address claim_holder_, address treasury_)
         external

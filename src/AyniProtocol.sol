@@ -2,10 +2,13 @@
 pragma solidity 0.8.30;
 
 import {IAyniFactory} from "./interfaces/IAyniFactory.sol";
+import {IAyniClaimOrigin} from "./interfaces/IAyniClaimOrigin.sol";
 import {IAyniRegistry} from "./interfaces/IAyniRegistry.sol";
 import {IAyniVaultActions} from "./interfaces/IAyniVaultActions.sol";
 import {IAyniVaultView} from "./interfaces/IAyniVaultView.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
+import {SafeERC20} from "./utils/SafeERC20.sol";
+import {ReentrancyGuard} from "./utils/ReentrancyGuard.sol";
 import {
     FillInstruction,
     GaslessCrossChainOrder,
@@ -15,7 +18,9 @@ import {
     ResolvedCrossChainOrder
 } from "./intents/ERC7683.sol";
 
-contract AyniProtocol is IOriginSettler {
+contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     bytes32 public constant AYNI_ORDER_DATA_TYPE = keccak256(
         "AyniOrderData(address collateral_token,address debt_asset,uint256 requested_amount,bytes32 recipient,uint256 destination_chain_id)"
     );
@@ -59,12 +64,14 @@ contract AyniProtocol is IOriginSettler {
     struct DebtPosition {
         address vault;
         address borrower;
+        address recipient;
         address collateral_token;
         address debt_asset;
         uint256 principal;
         uint256 protocol_fee_bps;
         uint256 fill_deadline;
         uint256 filled_at;
+        bytes32 expected_fill_hash;
         ClaimStatus status;
     }
 
@@ -107,6 +114,7 @@ contract AyniProtocol is IOriginSettler {
         require(registry_ != address(0), "Protocol: bad registry");
         require(owner_ != address(0), "Protocol: bad owner");
 
+        _initializeReentrancyGuard();
         factory = IAyniFactory(factory_);
         registry = IAyniRegistry(registry_);
         _owner = owner_;
@@ -130,12 +138,14 @@ contract AyniProtocol is IOriginSettler {
         returns (
             address vault,
             address borrower,
+            address recipient,
             address collateral_token,
             address debt_asset,
             uint256 principal,
             uint256 protocol_fee_bps,
             uint256 fill_deadline,
             uint256 filled_at,
+            bytes32 expected_fill_hash,
             uint8 status
         )
     {
@@ -144,12 +154,14 @@ contract AyniProtocol is IOriginSettler {
         return (
             position.vault,
             position.borrower,
+            position.recipient,
             position.collateral_token,
             position.debt_asset,
             position.principal,
             position.protocol_fee_bps,
             position.fill_deadline,
             position.filled_at,
+            position.expected_fill_hash,
             uint8(position.status)
         );
     }
@@ -159,6 +171,7 @@ contract AyniProtocol is IOriginSettler {
     }
 
     function set_destination_settler(address new_settler) external onlyOwner {
+        require(new_settler != address(0), "Protocol: bad settler");
         address old_settler = destination_settler;
         destination_settler = new_settler;
         emit DestinationSettlerUpdated(old_settler, new_settler);
@@ -167,6 +180,7 @@ contract AyniProtocol is IOriginSettler {
     function create_market(address collateral_token, address debt_asset, address oracle, address vault_owner)
         external
         onlyOwner
+        nonReentrant
         returns (address vault)
     {
         vault = factory.create_vault(collateral_token, debt_asset, oracle, vault_owner);
@@ -185,10 +199,9 @@ contract AyniProtocol is IOriginSettler {
         address vault = registry.get_vault(collateral_token, debt_asset);
         require(vault != address(0), "Protocol: market missing");
 
-        (uint256 id, address collateralAsset, address debtAsset, address oracle, address vaultOwner, bool active) =
+        (uint256 market_id, address collateralAsset, address debtAsset, address oracle, address vaultOwner, bool active) =
             registry.get_vault_metadata(vault);
-
-        id;
+        require(market_id != 0, "Protocol: bad market");
 
         IAyniVaultView vaultView = IAyniVaultView(vault);
         return MarketSummary({
@@ -245,33 +258,38 @@ contract AyniProtocol is IOriginSettler {
         IAyniVaultActions(_requireMarket(collateral_token, debt_asset)).liquidate(user, debt_to_cover);
     }
 
-    function cancel_claim(bytes32 order_id) external {
+    function cancel_claim(bytes32 order_id) external nonReentrant {
         DebtPosition storage position = _debt_positions[order_id];
         require(position.borrower == msg.sender, "Protocol: not borrower");
         require(position.status == ClaimStatus.OPEN, "Protocol: bad claim");
 
-        IAyniVaultActions(position.vault).cancel_solver_borrow_for(order_id, position.borrower);
         position.status = ClaimStatus.CANCELLED;
+        IAyniVaultActions(position.vault).cancel_solver_borrow_for(order_id, position.borrower);
 
         emit ClaimCancelled(order_id, position.borrower);
     }
 
-    function confirm_fill(bytes32 order_id, address solver) external onlyDestinationSettler {
+    function confirm_fill(bytes32 order_id, address solver, bytes calldata origin_data)
+        external
+        onlyDestinationSettler
+        nonReentrant
+    {
         require(solver != address(0), "Protocol: bad solver");
 
         DebtPosition storage position = _debt_positions[order_id];
         require(position.status == ClaimStatus.OPEN, "Protocol: bad claim");
+        require(block.timestamp <= position.fill_deadline, "Protocol: fill expired");
+        require(keccak256(origin_data) == position.expected_fill_hash, "Protocol: bad fill data");
 
         claim_holder[order_id] = solver;
         position.filled_at = block.timestamp;
         position.status = ClaimStatus.FILLED;
-
         IAyniVaultActions(position.vault).mark_solver_borrow_filled(order_id);
 
         emit ClaimFilled(order_id, solver, position.borrower);
     }
 
-    function transfer_claim(bytes32 order_id, address new_holder) external {
+    function transfer_claim(bytes32 order_id, address new_holder) external nonReentrant {
         require(new_holder != address(0), "Protocol: bad holder");
         require(claim_holder[order_id] == msg.sender, "Protocol: not claim holder");
         require(_debt_positions[order_id].status == ClaimStatus.FILLED, "Protocol: bad claim");
@@ -281,45 +299,45 @@ contract AyniProtocol is IOriginSettler {
         emit ClaimTransferred(order_id, msg.sender, new_holder);
     }
 
-    function repay_claim(bytes32 order_id, uint256 amount) external {
+    // slither-disable-next-line reentrancy-no-eth
+    function repay_claim(bytes32 order_id, uint256 amount) external nonReentrant {
         DebtPosition storage position = _debt_positions[order_id];
         address recipient = claim_holder[order_id];
 
         require(position.status == ClaimStatus.FILLED, "Protocol: bad claim");
         require(recipient != address(0), "Protocol: no claim holder");
 
-        uint256 actual = IAyniVaultActions(position.vault).repay_claim_for(order_id, position.borrower, amount);
+        (uint256 actual, uint256 remaining_debt) =
+            IAyniVaultActions(position.vault).repay_claim_for(order_id, position.borrower, amount);
         uint256 protocol_fee = actual * position.protocol_fee_bps / 10_000;
         uint256 claim_proceeds = actual - protocol_fee;
-
-        if (protocol_fee > 0) {
-            require(IERC20(position.debt_asset).transferFrom(msg.sender, _owner, protocol_fee), "protocol fee failed");
-        }
-
-        require(IERC20(position.debt_asset).transferFrom(msg.sender, recipient, claim_proceeds), "claim repay failed");
-
-        (, uint256 remaining_debt,) = IAyniVaultView(position.vault).positions(position.borrower);
 
         if (remaining_debt == 0) {
             position.status = ClaimStatus.REPAID;
             delete claim_holder[order_id];
         }
 
+        if (protocol_fee > 0) {
+            IERC20(position.debt_asset).safeTransferFrom(msg.sender, _owner, protocol_fee);
+        }
+
+        IERC20(position.debt_asset).safeTransferFrom(msg.sender, recipient, claim_proceeds);
+
         emit ClaimRepaid(order_id, msg.sender, actual, protocol_fee);
     }
 
-    function liquidate_claim(bytes32 order_id) external {
+    function liquidate_claim(bytes32 order_id) external nonReentrant {
         DebtPosition storage position = _debt_positions[order_id];
         address recipient = claim_holder[order_id];
 
         require(position.status == ClaimStatus.FILLED, "Protocol: bad claim");
         require(recipient != address(0), "Protocol: no claim holder");
 
-        (uint256 claim_proceeds, uint256 protocol_proceeds) =
-            IAyniVaultActions(position.vault).liquidate_claim_for(order_id, recipient, _owner);
-
         position.status = ClaimStatus.LIQUIDATED;
         delete claim_holder[order_id];
+
+        (uint256 claim_proceeds, uint256 protocol_proceeds) =
+            IAyniVaultActions(position.vault).liquidate_claim_for(order_id, recipient, _owner);
 
         emit ClaimLiquidated(order_id, recipient, claim_proceeds, protocol_proceeds);
     }
@@ -328,10 +346,17 @@ contract AyniProtocol is IOriginSettler {
         revert("Protocol: gasless unsupported");
     }
 
-    function open(OnchainCrossChainOrder calldata order) external {
+    function open(OnchainCrossChainOrder calldata order) external nonReentrant {
         require(destination_settler != address(0), "Protocol: destination settler unset");
 
-        (ResolvedCrossChainOrder memory resolved, AyniOrderData memory order_data, address vault, uint256 fee_bps) =
+        (
+            ResolvedCrossChainOrder memory resolved,
+            AyniOrderData memory order_data,
+            address vault,
+            address recipient,
+            bytes32 expected_fill_hash,
+            uint256 fee_bps
+        ) =
             _resolve_order(msg.sender, order, _order_nonce[msg.sender] + 1);
 
         uint256 debt_amount = order_data.requested_amount + order_data.requested_amount * fee_bps / 10_000;
@@ -340,12 +365,14 @@ contract AyniProtocol is IOriginSettler {
         _debt_positions[resolved.orderId] = DebtPosition({
             vault: vault,
             borrower: msg.sender,
+            recipient: recipient,
             collateral_token: order_data.collateral_token,
             debt_asset: order_data.debt_asset,
             principal: order_data.requested_amount,
             protocol_fee_bps: fee_bps,
             fill_deadline: order.fillDeadline,
             filled_at: 0,
+            expected_fill_hash: expected_fill_hash,
             status: ClaimStatus.OPEN
         });
 
@@ -369,13 +396,20 @@ contract AyniProtocol is IOriginSettler {
         view
         returns (ResolvedCrossChainOrder memory resolved)
     {
-        (resolved,,,) = _resolve_order(msg.sender, order, _order_nonce[msg.sender] + 1);
+        (resolved,,,,,) = _resolve_order(msg.sender, order, _order_nonce[msg.sender] + 1);
     }
 
     function _resolve_order(address user, OnchainCrossChainOrder calldata order, uint256 nonce)
         internal
         view
-        returns (ResolvedCrossChainOrder memory resolved, AyniOrderData memory order_data, address vault, uint256 fee_bps)
+        returns (
+            ResolvedCrossChainOrder memory resolved,
+            AyniOrderData memory order_data,
+            address vault,
+            address recipient,
+            bytes32 expected_fill_hash,
+            uint256 fee_bps
+        )
     {
         require(order.orderDataType == AYNI_ORDER_DATA_TYPE, "Protocol: bad order type");
 
@@ -384,7 +418,7 @@ contract AyniProtocol is IOriginSettler {
         fee_bps = IAyniVaultView(vault).borrow_fee_bps();
 
         bytes32 order_id = _build_order_id(user, nonce, order);
-        address recipient = _recipient_address(user, order_data.recipient);
+        recipient = _recipient_address(user, order_data.recipient);
 
         Output[] memory max_spent = new Output[](1);
         max_spent[0] = Output({
@@ -396,16 +430,18 @@ contract AyniProtocol is IOriginSettler {
 
         Output[] memory min_received = new Output[](0);
         FillInstruction[] memory instructions = new FillInstruction[](1);
+        bytes memory fill_origin_data = abi.encode(
+            FillOriginData({
+                recipient: recipient,
+                debt_asset: order_data.debt_asset,
+                amount: order_data.requested_amount
+            })
+        );
+        expected_fill_hash = keccak256(fill_origin_data);
         instructions[0] = FillInstruction({
             destinationChainId: order_data.destination_chain_id,
             destinationSettler: _toBytes32(destination_settler),
-            originData: abi.encode(
-                FillOriginData({
-                    recipient: recipient,
-                    debt_asset: order_data.debt_asset,
-                    amount: order_data.requested_amount
-                })
-            )
+            originData: fill_origin_data
         });
 
         resolved = ResolvedCrossChainOrder({

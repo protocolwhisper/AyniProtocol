@@ -2,8 +2,9 @@
 pragma solidity 0.8.30;
 
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
+import {IAyniOracle} from "./interfaces/IAyniOracle.sol";
 
-contract AyniOracle {
+contract AyniOracle is IAyniOracle {
     uint256 public constant CONFIG_DELAY = 1 days;
 
     bytes32 private constant PARAM_PRICE_FEED = keccak256("price_feed");
@@ -67,9 +68,10 @@ contract AyniOracle {
             return fallback_price;
         }
 
-        (uint80 round_id, int256 answer,, uint256 updated_at, uint80 answered_in_round) =
+        (uint80 round_id, int256 answer, uint256 started_at, uint256 updated_at, uint80 answered_in_round) =
             IAggregatorV3(price_feed).latestRoundData();
 
+        require(started_at != 0 && started_at <= updated_at, "Oracle: bad round");
         require(updated_at <= block.timestamp, "Oracle: future");
         require(block.timestamp - updated_at <= max_staleness, "Oracle: stale");
         require(answered_in_round >= round_id, "Oracle: incomplete");

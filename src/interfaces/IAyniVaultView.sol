@@ -18,6 +18,8 @@ interface IAyniVaultView {
 
     function max_borrow(address user) external view returns (uint256);
 
+    function debt_of(address user) external view returns (uint256);
+
     function available_liquidity() external view returns (uint256);
 
     function paused() external view returns (bool);

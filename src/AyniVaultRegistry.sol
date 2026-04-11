@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-contract AyniVaultRegistry {
+import {IAyniVaultRegistry} from "./interfaces/IAyniVaultRegistry.sol";
+
+contract AyniVaultRegistry is IAyniVaultRegistry {
     address private immutable _owner;
 
     address public factory;

@@ -304,6 +304,36 @@ contract AyniProtocolTest is TestBase {
         assertTrue(usdc.balanceOf(CLAIM_BUYER) > buyerBefore);
     }
 
+    function test_fill_reverts_if_origin_data_is_tampered() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+        usdc.mint(SOLVER, 10_000e6);
+
+        vm.startPrank(USER);
+        collateral.approve(vaultAddress, type(uint256).max);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        ResolvedCrossChainOrder memory resolved = protocol.resolve(_borrowOrder(address(collateral), address(usdc), USER));
+        protocol.open(_borrowOrder(address(collateral), address(usdc), USER));
+        vm.stopPrank();
+
+        bytes32 orderId = resolved.orderId;
+        bytes memory maliciousOriginData = abi.encode(SOLVER, address(usdc), BORROW_AMOUNT);
+
+        uint256 solverBefore = usdc.balanceOf(SOLVER);
+        uint256 userBefore = usdc.balanceOf(USER);
+
+        vm.startPrank(SOLVER);
+        usdc.approve(address(destinationSettler), type(uint256).max);
+        vm.expectRevert(bytes("Protocol: bad fill data"));
+        destinationSettler.fill(orderId, maliciousOriginData, "");
+        vm.stopPrank();
+
+        assertEq(protocol.claim_holder(orderId), address(0));
+        assertEq(usdc.balanceOf(SOLVER), solverBefore);
+        assertEq(usdc.balanceOf(USER), userBefore);
+    }
+
     function test_liquidated_claim_sends_collateral_to_claim_holder() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);

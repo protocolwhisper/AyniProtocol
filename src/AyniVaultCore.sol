@@ -4,9 +4,12 @@ pragma solidity 0.8.30;
 import {IAyniOracle} from "./interfaces/IAyniOracle.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IERC20Metadata} from "./interfaces/IERC20Metadata.sol";
+import {SafeERC20} from "./utils/SafeERC20.sol";
 import {ReentrancyGuard} from "./utils/ReentrancyGuard.sol";
 
 abstract contract AyniVaultCore is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     uint256 public constant CONFIG_DELAY = 1 days;
 
     uint256 internal constant BPS_DENOMINATOR = 10_000;
@@ -162,36 +165,11 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     }
 
     function deposit(uint256 amount) external nonReentrant {
-        require(!paused, "Vault: paused");
-        require(amount >= min_collateral, "below minimum");
-
-        _accrue(msg.sender);
-
-        positions[msg.sender].collateral += amount;
-        total_collateral += amount;
-
-        require(IERC20(_collateral_token).transferFrom(msg.sender, address(this), amount), "deposit transfer failed");
-
-        emit Deposit(msg.sender, amount);
+        _deposit(msg.sender, amount);
     }
 
     function withdraw(uint256 amount) external nonReentrant {
-        require(amount > 0, "amount=0");
-
-        _accrue(msg.sender);
-
-        uint256 new_collateral = positions[msg.sender].collateral - amount;
-        require(
-            _health_factor_after(new_collateral, positions[msg.sender].debt) >= MIN_HEALTH_FACTOR,
-            "would undercollateralize"
-        );
-
-        positions[msg.sender].collateral = new_collateral;
-        total_collateral -= amount;
-
-        require(IERC20(_collateral_token).transfer(msg.sender, amount), "withdraw transfer failed");
-
-        emit Withdraw(msg.sender, amount);
+        _withdraw(msg.sender, amount);
     }
 
     function record_borrow(uint256 amount) external nonReentrant {
@@ -288,7 +266,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         external
         nonReentrant
         onlyRouter
-        returns (uint256 actual)
+        returns (uint256 actual, uint256 remaining_debt)
     {
         require(amount > 0, "amount=0");
 
@@ -303,8 +281,9 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
         positions[user].debt -= actual;
         total_debt -= actual;
+        remaining_debt = positions[user].debt;
 
-        if (positions[user].debt == 0) {
+        if (remaining_debt == 0) {
             order.status = SolverBorrowStatus.REPAID;
             active_solver_order[user] = bytes32(0);
         }
@@ -344,10 +323,10 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         claim_proceeds = collateral_amount - protocol_proceeds;
 
         if (protocol_proceeds > 0) {
-            require(IERC20(_collateral_token).transfer(treasury_, protocol_proceeds), "protocol collateral transfer failed");
+            IERC20(_collateral_token).safeTransfer(treasury_, protocol_proceeds);
         }
 
-        require(IERC20(_collateral_token).transfer(claim_holder_, claim_proceeds), "claim collateral transfer failed");
+        IERC20(_collateral_token).safeTransfer(claim_holder_, claim_proceeds);
 
         emit Liquidated(borrower, claim_holder_, claim_proceeds, debt_covered);
         emit ClaimAccountingLiquidated(order_id, borrower, claim_proceeds, protocol_proceeds);
@@ -362,7 +341,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         positions[user].collateral += amount;
         total_collateral += amount;
 
-        require(IERC20(_collateral_token).transferFrom(user, address(this), amount), "deposit transfer failed");
+        IERC20(_collateral_token).safeTransferFrom(user, address(this), amount);
 
         emit Deposit(user, amount);
     }
@@ -381,7 +360,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         positions[user].collateral = new_collateral;
         total_collateral -= amount;
 
-        require(IERC20(_collateral_token).transfer(user, amount), "withdraw transfer failed");
+        IERC20(_collateral_token).safeTransfer(user, amount);
 
         emit Withdraw(user, amount);
     }
@@ -403,7 +382,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
         positions[user].debt = new_debt;
         total_debt += amount + fee;
-        require(IERC20(_usdc).transfer(user, amount), "borrow transfer failed");
+        IERC20(_usdc).safeTransfer(user, amount);
 
         emit BorrowRecorded(user, amount, fee);
     }
@@ -424,7 +403,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         positions[user].debt -= actual;
         total_debt -= actual;
 
-        require(IERC20(_usdc).transferFrom(user, address(this), actual), "repay transfer failed");
+        IERC20(_usdc).safeTransferFrom(user, address(this), actual);
 
         emit Repay(user, actual);
     }
@@ -447,8 +426,8 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         total_debt -= debt_to_cover;
         total_collateral -= collateral_seized;
 
-        require(IERC20(_usdc).transferFrom(msg.sender, address(this), debt_to_cover), "liquidation transfer failed");
-        require(IERC20(_collateral_token).transfer(msg.sender, collateral_seized), "collateral transfer failed");
+        IERC20(_usdc).safeTransferFrom(msg.sender, address(this), debt_to_cover);
+        IERC20(_collateral_token).safeTransfer(msg.sender, collateral_seized);
 
         emit Liquidated(user, msg.sender, collateral_seized, debt_to_cover);
     }
@@ -490,6 +469,10 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         }
 
         return max_debt - positions[user].debt;
+    }
+
+    function debt_of(address user) external view returns (uint256) {
+        return positions[user].debt;
     }
 
     function available_liquidity() external view returns (uint256) {
@@ -613,7 +596,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
     function recover_usdc(address to, uint256 amount) external onlyOwner {
         require(to != address(0), "Vault: bad to");
-        require(IERC20(_usdc).transfer(to, amount), "recover transfer failed");
+        IERC20(_usdc).safeTransfer(to, amount);
     }
 
     function _accrue(address user) internal {

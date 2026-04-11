@@ -7,3 +7,6 @@ solc_version = "0.8.30"
 auto_detect_solc = false
 optimizer = true
 optimizer_runs = 200
+
+[fuzz]
+runs = 1000

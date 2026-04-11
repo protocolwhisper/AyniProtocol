@@ -2,13 +2,13 @@
 pragma solidity 0.8.30;
 
 import {IERC20} from "./interfaces/IERC20.sol";
+import {IAyniClaimOrigin} from "./interfaces/IAyniClaimOrigin.sol";
 import {IDestinationSettler} from "./intents/ERC7683.sol";
-
-interface IAyniClaimOrigin {
-    function confirm_fill(bytes32 order_id, address solver) external;
-}
+import {SafeERC20} from "./utils/SafeERC20.sol";
 
 contract AyniDestinationSettler is IDestinationSettler {
+    using SafeERC20 for IERC20;
+
     struct FillOriginData {
         address recipient;
         address debt_asset;
@@ -22,17 +22,12 @@ contract AyniDestinationSettler is IDestinationSettler {
         origin_settler = IAyniClaimOrigin(origin_settler_);
     }
 
-    function fill(bytes32 orderId, bytes calldata originData, bytes calldata fillerData) external {
-        fillerData;
-
+    function fill(bytes32 orderId, bytes calldata originData, bytes calldata) external {
         FillOriginData memory fill_data = abi.decode(originData, (FillOriginData));
         require(fill_data.recipient != address(0), "DestinationSettler: bad recipient");
 
-        require(
-            IERC20(fill_data.debt_asset).transferFrom(msg.sender, fill_data.recipient, fill_data.amount),
-            "DestinationSettler: fill transfer failed"
-        );
+        IERC20(fill_data.debt_asset).safeTransferFrom(msg.sender, fill_data.recipient, fill_data.amount);
 
-        origin_settler.confirm_fill(orderId, msg.sender);
+        origin_settler.confirm_fill(orderId, msg.sender, originData);
     }
 }
