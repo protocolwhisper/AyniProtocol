@@ -3,7 +3,9 @@ pragma solidity 0.8.30;
 
 import {IAyniFactory} from "./interfaces/IAyniFactory.sol";
 import {IAyniClaimOrigin} from "./interfaces/IAyniClaimOrigin.sol";
+import {IAyniClaimDebtRouter} from "./interfaces/IAyniClaimDebtRouter.sol";
 import {IAyniRegistry} from "./interfaces/IAyniRegistry.sol";
+import {IAyniSolverPool} from "./interfaces/IAyniSolverPool.sol";
 import {IAyniVaultActions} from "./interfaces/IAyniVaultActions.sol";
 import {IAyniVaultView} from "./interfaces/IAyniVaultView.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
@@ -18,7 +20,7 @@ import {
     ResolvedCrossChainOrder
 } from "./intents/ERC7683.sol";
 
-contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
+contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant AYNI_ORDER_DATA_TYPE = keccak256(
@@ -86,11 +88,14 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
 
     mapping(bytes32 => DebtPosition) private _debt_positions;
     mapping(address => uint256) private _order_nonce;
+    mapping(address => address) private _solver_pools;
+    mapping(bytes32 => address) private _claim_pools;
 
     event MarketCreated(
         address indexed vault, address indexed collateral_token, address debt_asset, address oracle, address vault_owner
     );
     event DestinationSettlerUpdated(address indexed old_settler, address indexed new_settler);
+    event SolverPoolUpdated(address indexed vault, address indexed old_pool, address indexed new_pool);
     event ClaimTransferred(bytes32 indexed order_id, address indexed from, address indexed to);
     event ClaimFilled(bytes32 indexed order_id, address indexed solver, address indexed borrower);
     event ClaimCancelled(bytes32 indexed order_id, address indexed borrower);
@@ -175,6 +180,18 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
         address old_settler = destination_settler;
         destination_settler = new_settler;
         emit DestinationSettlerUpdated(old_settler, new_settler);
+    }
+
+    function set_solver_pool(address collateral_token, address debt_asset, address new_pool) external onlyOwner {
+        require(new_pool != address(0), "Protocol: bad pool");
+        address vault = _requireMarket(collateral_token, debt_asset);
+        address old_pool = _solver_pools[vault];
+        _solver_pools[vault] = new_pool;
+        emit SolverPoolUpdated(vault, old_pool, new_pool);
+    }
+
+    function get_solver_pool(address collateral_token, address debt_asset) external view returns (address) {
+        return _solver_pools[_requireMarket(collateral_token, debt_asset)];
     }
 
     function create_market(address collateral_token, address debt_asset, address oracle, address vault_owner)
@@ -299,6 +316,27 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
         emit ClaimTransferred(order_id, msg.sender, new_holder);
     }
 
+    function fill_with_pool(bytes32 order_id) external nonReentrant {
+        DebtPosition storage position = _debt_positions[order_id];
+        require(position.status == ClaimStatus.OPEN, "Protocol: bad claim");
+        require(block.timestamp <= position.fill_deadline, "Protocol: fill expired");
+
+        address pool = _solver_pools[position.vault];
+        require(pool != address(0), "Protocol: solver pool unset");
+        require(position.debt_asset == IAyniSolverPool(pool).asset(), "Protocol: bad pool asset");
+
+        claim_holder[order_id] = pool;
+        _claim_pools[order_id] = pool;
+        position.filled_at = block.timestamp;
+        position.status = ClaimStatus.FILLED;
+
+        IAyniSolverPool(pool).fundClaim(order_id, position.principal, position.borrower);
+        IERC20(position.debt_asset).safeTransfer(position.recipient, position.principal);
+        IAyniVaultActions(position.vault).mark_solver_borrow_filled_with_debt(order_id, position.principal);
+
+        emit ClaimFilled(order_id, pool, position.borrower);
+    }
+
     // slither-disable-next-line reentrancy-no-eth
     function repay_claim(bytes32 order_id, uint256 amount) external nonReentrant {
         DebtPosition storage position = _debt_positions[order_id];
@@ -307,6 +345,23 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
         require(position.status == ClaimStatus.FILLED, "Protocol: bad claim");
         require(recipient != address(0), "Protocol: no claim holder");
 
+        if (recipient == _claim_pools[order_id]) {
+            (uint256 actual_paid, uint256 remaining_debt_after) =
+                IAyniVaultActions(position.vault).repay_claim_for(order_id, position.borrower, amount);
+
+            IERC20(position.debt_asset).safeTransferFrom(msg.sender, recipient, actual_paid);
+            IAyniSolverPool(recipient).settleRepayment(order_id, actual_paid);
+
+            if (remaining_debt_after == 0) {
+                position.status = ClaimStatus.REPAID;
+                delete _claim_pools[order_id];
+                delete claim_holder[order_id];
+            }
+
+            emit ClaimRepaid(order_id, msg.sender, actual_paid, 0);
+            return;
+        }
+
         (uint256 actual, uint256 remaining_debt) =
             IAyniVaultActions(position.vault).repay_claim_for(order_id, position.borrower, amount);
         uint256 protocol_fee = actual * position.protocol_fee_bps / 10_000;
@@ -314,6 +369,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
 
         if (remaining_debt == 0) {
             position.status = ClaimStatus.REPAID;
+            delete _claim_pools[order_id];
             delete claim_holder[order_id];
         }
 
@@ -333,7 +389,24 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
         require(position.status == ClaimStatus.FILLED, "Protocol: bad claim");
         require(recipient != address(0), "Protocol: no claim holder");
 
+        if (recipient == _claim_pools[order_id]) {
+            uint256 debt_to_cover = IAyniSolverPool(recipient).currentDebt(order_id);
+            require(debt_to_cover > 0, "Protocol: no debt");
+
+            position.status = ClaimStatus.LIQUIDATED;
+            delete _claim_pools[order_id];
+            delete claim_holder[order_id];
+
+            IERC20(position.debt_asset).safeTransferFrom(msg.sender, recipient, debt_to_cover);
+            (uint256 collateral_amount,) = IAyniVaultActions(position.vault).liquidate_pool_claim_for(order_id, msg.sender);
+            IAyniSolverPool(recipient).settleLiquidation(order_id, debt_to_cover);
+
+            emit ClaimLiquidated(order_id, msg.sender, collateral_amount, 0);
+            return;
+        }
+
         position.status = ClaimStatus.LIQUIDATED;
+        delete _claim_pools[order_id];
         delete claim_holder[order_id];
 
         (uint256 claim_proceeds, uint256 protocol_proceeds) =
@@ -397,6 +470,18 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, ReentrancyGuard {
         returns (ResolvedCrossChainOrder memory resolved)
     {
         (resolved,,,,,) = _resolve_order(msg.sender, order, _order_nonce[msg.sender] + 1);
+    }
+
+    function claim_debt_state(bytes32 order_id) external view returns (uint256 current_debt, bool managed_by_pool) {
+        address pool = _claim_pools[order_id];
+
+        if (
+            pool == address(0) || claim_holder[order_id] != pool || _debt_positions[order_id].status != ClaimStatus.FILLED
+        ) {
+            return (0, false);
+        }
+
+        return (IAyniSolverPool(pool).currentDebt(order_id), true);
     }
 
     function _resolve_order(address user, OnchainCrossChainOrder calldata order, uint256 nonce)

@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {IAyniOracle} from "./interfaces/IAyniOracle.sol";
+import {IAyniClaimDebtRouter} from "./interfaces/IAyniClaimDebtRouter.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IERC20Metadata} from "./interfaces/IERC20Metadata.sol";
 import {SafeERC20} from "./utils/SafeERC20.sol";
@@ -49,6 +50,7 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         uint256 claim_proceeds,
         uint256 protocol_proceeds
     );
+    event ClaimCollateralReleased(bytes32 indexed order_id, address indexed borrower, uint256 collateral_amount);
 
     enum SolverBorrowStatus {
         NONE,
@@ -242,23 +244,36 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     }
 
     function mark_solver_borrow_filled(bytes32 order_id) external nonReentrant onlyRouter {
+        _markSolverBorrowFilled(order_id, _solver_orders[order_id].debt_amount);
+    }
+
+    function mark_solver_borrow_filled_with_debt(bytes32 order_id, uint256 debt_amount)
+        external
+        nonReentrant
+        onlyRouter
+    {
+        _markSolverBorrowFilled(order_id, debt_amount);
+    }
+
+    function _markSolverBorrowFilled(bytes32 order_id, uint256 debt_amount) internal {
         SolverBorrowOrder storage order = _solver_orders[order_id];
         require(order.status == SolverBorrowStatus.OPEN, "Vault: bad order");
         require(block.timestamp <= order.expiry, "Vault: order expired");
+        require(debt_amount >= order.principal, "Vault: bad debt amount");
 
         address borrower = order.borrower;
         _accrue(borrower);
 
         require(active_solver_order[borrower] == order_id, "Vault: inactive order");
         require(positions[borrower].debt == 0, "Vault: existing debt");
-        require(_health_factor_after(positions[borrower].collateral, order.debt_amount) >= MIN_HEALTH_FACTOR, "would undercollateralize");
+        require(_health_factor_after(positions[borrower].collateral, debt_amount) >= MIN_HEALTH_FACTOR, "would undercollateralize");
 
-        positions[borrower].debt = order.debt_amount;
-        total_debt += order.debt_amount;
+        positions[borrower].debt = debt_amount;
+        total_debt += debt_amount;
         order.status = SolverBorrowStatus.FILLED;
         order.filled_at = block.timestamp;
 
-        emit BorrowRecorded(borrower, order.principal, order.debt_amount - order.principal);
+        emit BorrowRecorded(borrower, order.principal, debt_amount - order.principal);
         emit SolverBorrowFilled(order_id, borrower, order.filled_at);
     }
 
@@ -286,6 +301,14 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         if (remaining_debt == 0) {
             order.status = SolverBorrowStatus.REPAID;
             active_solver_order[user] = bytes32(0);
+
+            uint256 released = positions[user].collateral;
+            if (released > 0) {
+                positions[user].collateral = 0;
+                total_collateral -= released;
+                IERC20(_collateral_token).safeTransfer(user, released);
+                emit ClaimCollateralReleased(order_id, user, released);
+            }
         }
 
         emit Repay(user, actual);
@@ -330,6 +353,38 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
         emit Liquidated(borrower, claim_holder_, claim_proceeds, debt_covered);
         emit ClaimAccountingLiquidated(order_id, borrower, claim_proceeds, protocol_proceeds);
+    }
+
+    function liquidate_pool_claim_for(bytes32 order_id, address recipient)
+        external
+        nonReentrant
+        onlyRouter
+        returns (uint256 collateral_amount, uint256 debt_covered)
+    {
+        require(recipient != address(0), "Vault: bad recipient");
+
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        require(order.status == SolverBorrowStatus.FILLED, "Vault: bad order");
+
+        address borrower = order.borrower;
+        _accrue(borrower);
+
+        require(_health_factor(borrower) < MIN_HEALTH_FACTOR, "position healthy");
+
+        debt_covered = positions[borrower].debt;
+        collateral_amount = positions[borrower].collateral;
+
+        positions[borrower].debt = 0;
+        positions[borrower].collateral = 0;
+        total_debt -= debt_covered;
+        total_collateral -= collateral_amount;
+        active_solver_order[borrower] = bytes32(0);
+        order.status = SolverBorrowStatus.LIQUIDATED;
+
+        IERC20(_collateral_token).safeTransfer(recipient, collateral_amount);
+
+        emit Liquidated(borrower, recipient, collateral_amount, debt_covered);
+        emit ClaimAccountingLiquidated(order_id, borrower, collateral_amount, 0);
     }
 
     function _deposit(address user, uint256 amount) internal {
@@ -463,16 +518,17 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     function max_borrow(address user) external view returns (uint256) {
         uint256 col_usd = _collateral_usd(user);
         uint256 max_debt = col_usd * max_ltv / BPS_DENOMINATOR;
+        uint256 current_debt = _liveDebt(user);
 
-        if (max_debt <= positions[user].debt) {
+        if (max_debt <= current_debt) {
             return 0;
         }
 
-        return max_debt - positions[user].debt;
+        return max_debt - current_debt;
     }
 
     function debt_of(address user) external view returns (uint256) {
-        return positions[user].debt;
+        return _liveDebt(user);
     }
 
     function available_liquidity() external view returns (uint256) {
@@ -601,6 +657,26 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
     function _accrue(address user) internal {
         Position storage position = positions[user];
+        bytes32 order_id = active_solver_order[user];
+
+        if (order_id != bytes32(0) && _solver_orders[order_id].status == SolverBorrowStatus.FILLED) {
+            (uint256 synced_debt, bool managed_by_pool) = IAyniClaimDebtRouter(_router).claim_debt_state(order_id);
+
+            if (managed_by_pool) {
+                uint256 previous_debt = position.debt;
+
+                if (synced_debt > previous_debt) {
+                    total_debt += synced_debt - previous_debt;
+                } else if (previous_debt > synced_debt) {
+                    total_debt -= previous_debt - synced_debt;
+                }
+
+                position.debt = synced_debt;
+                position.last_update = block.timestamp;
+                return;
+            }
+        }
+
         uint256 elapsed = block.timestamp - position.last_update;
 
         if (elapsed == 0 || position.debt == 0) {
@@ -620,12 +696,14 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     }
 
     function _health_factor(address user) internal view returns (uint256) {
-        if (positions[user].debt == 0) {
+        uint256 debt = _liveDebt(user);
+
+        if (debt == 0) {
             return type(uint256).max;
         }
 
         uint256 col_usd = _collateral_usd(user);
-        return col_usd * liq_threshold * MIN_HEALTH_FACTOR / positions[user].debt / BPS_DENOMINATOR;
+        return col_usd * liq_threshold * MIN_HEALTH_FACTOR / debt / BPS_DENOMINATOR;
     }
 
     function _health_factor_after(uint256 new_col, uint256 new_debt) internal view returns (uint256) {
@@ -698,6 +776,20 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         }
 
         return _solver_orders[order_id].status == SolverBorrowStatus.OPEN;
+    }
+
+    function _liveDebt(address user) internal view returns (uint256 debt) {
+        debt = positions[user].debt;
+
+        bytes32 order_id = active_solver_order[user];
+        if (order_id == bytes32(0) || _solver_orders[order_id].status != SolverBorrowStatus.FILLED) {
+            return debt;
+        }
+
+        (uint256 synced_debt, bool managed_by_pool) = IAyniClaimDebtRouter(_router).claim_debt_state(order_id);
+        if (managed_by_pool) {
+            return synced_debt;
+        }
     }
 
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {

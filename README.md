@@ -2,6 +2,8 @@
 
 Solidity + Foundry version of the protocol contracts.
 
+For a full architecture and flow explainer, see [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md).
+
 ## Stack
 
 - Solidity `0.8.30`
