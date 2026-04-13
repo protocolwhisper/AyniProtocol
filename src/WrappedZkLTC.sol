@@ -15,14 +15,14 @@ contract WrappedZkLTC {
     event Withdrawal(address indexed account, uint256 amount);
 
     receive() external payable {
-        _deposit(msg.sender, msg.value);
+        deposit();
     }
 
     function totalSupply() external view returns (uint256) {
         return address(this).balance;
     }
 
-    function deposit() external payable {
+    function deposit() public payable {
         _deposit(msg.sender, msg.value);
     }
 
@@ -44,16 +44,17 @@ contract WrappedZkLTC {
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
+        return transferFrom(msg.sender, to, amount);
     }
 
-    function transferFrom(address from_, address to, uint256 amount) external returns (bool) {
-        uint256 allowed = allowance[from_][msg.sender];
+    function transferFrom(address from_, address to, uint256 amount) public returns (bool) {
+        if (from_ != msg.sender) {
+            uint256 allowed = allowance[from_][msg.sender];
 
-        if (allowed != type(uint256).max) {
-            allowance[from_][msg.sender] = allowed - amount;
-            emit Approval(from_, msg.sender, allowance[from_][msg.sender]);
+            if (allowed != type(uint256).max) {
+                allowance[from_][msg.sender] = allowed - amount;
+                emit Approval(from_, msg.sender, allowance[from_][msg.sender]);
+            }
         }
 
         _transfer(from_, to, amount);
@@ -61,8 +62,6 @@ contract WrappedZkLTC {
     }
 
     function _deposit(address account, uint256 amount) internal {
-        require(amount > 0, "WrappedZkLTC: amount=0");
-
         balanceOf[account] += amount;
 
         emit Deposit(account, amount);
