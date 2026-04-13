@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 
 contract ManualPriceFeed is IAggregatorV3 {
-    address private immutable _owner;
+    address private _owner;
 
     uint8 public immutable decimals;
 
@@ -14,6 +14,7 @@ contract ManualPriceFeed is IAggregatorV3 {
     uint80 private _answeredInRound;
 
     event PriceUpdated(uint80 roundId, int256 answer, uint256 updatedAt);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     modifier onlyOwner() {
         require(msg.sender == _owner, "ManualPriceFeed: not owner");
@@ -27,6 +28,7 @@ contract ManualPriceFeed is IAggregatorV3 {
         decimals = decimals_;
         _owner = owner_;
         _setPrice(initialAnswer_);
+        emit OwnershipTransferred(address(0), owner_);
     }
 
     function admin() external view returns (address) {
@@ -36,6 +38,15 @@ contract ManualPriceFeed is IAggregatorV3 {
     function setPrice(int256 newAnswer) external onlyOwner {
         require(newAnswer > 0, "ManualPriceFeed: bad answer");
         _setPrice(newAnswer);
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "ManualPriceFeed: bad owner");
+
+        address previousOwner = _owner;
+        _owner = newOwner;
+
+        emit OwnershipTransferred(previousOwner, newOwner);
     }
 
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {

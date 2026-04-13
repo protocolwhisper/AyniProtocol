@@ -7,6 +7,9 @@ to the integer format expected by the onchain oracle.
 
 Copy `.env.example` to `.env` and fill in any optional values you want.
 
+The helper reads `.env` at runtime, including `PRIVATE_KEY`. The key is not embedded
+into the release binary.
+
 ## Run
 
 ```bash
@@ -35,7 +38,7 @@ The tool prints:
 - the raw LTC/USD price
 - the scaled integer value for the oracle
 - the last update timestamp from CoinGecko
-- optional `cast send` commands if `ORACLE_CONTRACT_ADDRESS`, `RPC_URL`, and `ACCOUNT` are set
+- optional `cast send` commands if `PRIVATE_KEY`, `RPC_URL`, and contract addresses are set
 
 The `owner` command writes a local `generated-owner.json` file containing:
 
@@ -60,3 +63,4 @@ For test use, this is treated as `LTC / USDC` by assuming `USDC ~= USD`.
 - The account that deploys it needs gas.
 - The owner address only needs gas when you use owner-only functions such as
   `set_fallback_price`, `apply_fallback_price`, `set_use_fallback`, or `apply_use_fallback`.
+- The helper derives the owner/signer address from `PRIVATE_KEY` in `.env`.
