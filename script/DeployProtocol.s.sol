@@ -2,10 +2,14 @@
 pragma solidity 0.8.30;
 
 import {AyniOracle} from "../src/AyniOracle.sol";
+import {AyniDestinationSettler} from "../src/AyniDestinationSettler.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
+import {AyniSolverPool} from "../src/AyniSolverPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
+import {WrappedZkLTC} from "../src/WrappedZkLTC.sol";
+import {IERC20Metadata} from "../src/interfaces/IERC20Metadata.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockUSDT} from "../src/mocks/MockUSDT.sol";
 import {ScriptBase} from "./ScriptBase.sol";
@@ -23,12 +27,35 @@ contract DeployProtocol is ScriptBase {
         address usdc_vault,
         address usdt_vault
     );
+    event FullStackDeployed(
+        address implementation,
+        address registry,
+        address factory,
+        address protocol,
+        address destination_settler,
+        address wrapped_zkltc,
+        address oracle,
+        address solver_pool,
+        address market_vault
+    );
 
     struct CoreDeployment {
         address implementation;
         address registry;
         address factory;
         address protocol;
+    }
+
+    struct FullStackDeployment {
+        address implementation;
+        address registry;
+        address factory;
+        address protocol;
+        address destination_settler;
+        address wrapped_zkltc;
+        address oracle;
+        address solver_pool;
+        address market_vault;
     }
 
     function run(address owner) external returns (CoreDeployment memory deployment) {
@@ -81,6 +108,58 @@ contract DeployProtocol is ScriptBase {
         );
     }
 
+    function runFull(address owner, address debt_asset, address feed)
+        external
+        returns (FullStackDeployment memory deployment)
+    {
+        require(debt_asset != address(0), "Deploy: bad debt asset");
+        require(feed != address(0), "Deploy: bad feed");
+
+        vm.startBroadcast();
+
+        CoreDeployment memory core = _deployCore(owner);
+        deployment.implementation = core.implementation;
+        deployment.registry = core.registry;
+        deployment.factory = core.factory;
+        deployment.protocol = core.protocol;
+
+        deployment.destination_settler = address(new AyniDestinationSettler(core.protocol));
+        AyniProtocol(core.protocol).set_destination_settler(deployment.destination_settler);
+
+        deployment.wrapped_zkltc = address(new WrappedZkLTC());
+        deployment.oracle = address(new AyniOracle(feed, owner));
+        deployment.market_vault =
+            AyniProtocol(core.protocol).create_market(deployment.wrapped_zkltc, debt_asset, deployment.oracle, owner);
+
+        string memory asset_symbol = IERC20Metadata(debt_asset).symbol();
+        deployment.solver_pool = address(
+            new AyniSolverPool(
+                debt_asset,
+                core.protocol,
+                owner,
+                string(abi.encodePacked("Ayni ", asset_symbol, " Solver Share")),
+                string(abi.encodePacked("as", asset_symbol)),
+                _defaultRateModel()
+            )
+        );
+
+        AyniProtocol(core.protocol).set_solver_pool(deployment.wrapped_zkltc, debt_asset, deployment.solver_pool);
+
+        vm.stopBroadcast();
+
+        emit FullStackDeployed(
+            deployment.implementation,
+            deployment.registry,
+            deployment.factory,
+            deployment.protocol,
+            deployment.destination_settler,
+            deployment.wrapped_zkltc,
+            deployment.oracle,
+            deployment.solver_pool,
+            deployment.market_vault
+        );
+    }
+
     function _deployCore(address owner) internal returns (CoreDeployment memory deployment) {
         require(owner != address(0), "Deploy: bad owner");
 
@@ -91,5 +170,15 @@ contract DeployProtocol is ScriptBase {
 
         AyniVaultRegistry(deployment.registry).set_factory(deployment.factory);
         AyniVaultFactory(deployment.factory).set_manager(deployment.protocol);
+    }
+
+    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
+        return AyniSolverPool.RateModelConfig({
+            optimalUtilization: 65 * 1e25,
+            baseRate: 3 * 1e25,
+            slope1: 12 * 1e25,
+            slope2: 150 * 1e25,
+            reserveFactor: 15 * 1e25
+        });
     }
 }
