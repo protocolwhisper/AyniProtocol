@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {AyniOracle} from "../src/AyniOracle.sol";
 import {AyniDestinationSettler} from "../src/AyniDestinationSettler.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
-import {AyniSolverPool} from "../src/AyniSolverPool.sol";
+import {AyniLiquidityPool} from "../src/AyniLiquidityPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
@@ -91,8 +91,8 @@ contract AyniProtocolTest is TestBase {
     function test_market_borrow_uses_pool_and_repay_releases_collateral() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
-        AyniSolverPool pool = _deployPool(address(usdc));
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        AyniLiquidityPool pool = _deployPool(address(usdc));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
         usdc.mint(address(this), 20_000e6);
@@ -216,8 +216,8 @@ contract AyniProtocolTest is TestBase {
 
     function test_protocol_routes_market_actions() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
-        AyniSolverPool pool = _deployPool(address(usdc));
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        AyniLiquidityPool pool = _deployPool(address(usdc));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
         usdc.mint(address(this), 20_000e6);
@@ -245,11 +245,11 @@ contract AyniProtocolTest is TestBase {
         vm.startPrank(ADMIN);
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         protocol.set_destination_settler(address(destinationSettler));
-        protocol.set_solver_pool(address(collateral), address(usdc), address(0x1234));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(0x1234));
         vm.stopPrank();
 
         assertEq(protocol.get_market(address(collateral), address(usdc)), vaultAddress);
-        assertEq(protocol.get_solver_pool(address(collateral), address(usdc)), address(0x1234));
+        assertEq(protocol.get_liquidity_pool(address(collateral), address(usdc)), address(0x1234));
     }
 
     function test_non_owner_cannot_grant_protocol_admin() public {
@@ -422,12 +422,12 @@ contract AyniProtocolTest is TestBase {
         });
     }
 
-    function _deployPool(address asset_) internal returns (AyniSolverPool pool) {
-        pool = new AyniSolverPool(asset_, address(protocol), address(this), "Ayni Solver Share", "SWzkltc", _defaultRateModel());
+    function _deployPool(address asset_) internal returns (AyniLiquidityPool pool) {
+        pool = new AyniLiquidityPool(asset_, address(protocol), address(this), "Ayni Liquidity Pool", "SWzkltc", _defaultRateModel());
     }
 
-    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
-        return AyniSolverPool.RateModelConfig({
+    function _defaultRateModel() internal pure returns (AyniLiquidityPool.RateModelConfig memory) {
+        return AyniLiquidityPool.RateModelConfig({
             optimalUtilization: 65 * 1e25,
             baseRate: 3 * 1e25,
             slope1: 12 * 1e25,

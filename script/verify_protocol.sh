@@ -50,7 +50,7 @@ FACTORY="$(extract_address "AyniVaultFactory")"
 PROTOCOL="$(extract_address "AyniProtocol")"
 SETTLER="$(extract_address "AyniDestinationSettler")"
 WZKLTC="$(extract_address "WrappedZkLTC")"
-POOL="$(extract_address "AyniSolverPool")"
+POOL="$(extract_address "AyniLiquidityPool")"
 
 verify "$VAULT_IMPL" "$ROOT_DIR/src/AyniVault.sol:AyniVault"
 verify "$REGISTRY" "$ROOT_DIR/src/AyniVaultRegistry.sol:AyniVaultRegistry"
@@ -58,7 +58,7 @@ verify "$FACTORY" "$ROOT_DIR/src/AyniVaultFactory.sol:AyniVaultFactory"
 verify "$PROTOCOL" "$ROOT_DIR/src/AyniProtocol.sol:AyniProtocol"
 verify "$SETTLER" "$ROOT_DIR/src/AyniDestinationSettler.sol:AyniDestinationSettler"
 verify "$WZKLTC" "$ROOT_DIR/src/WrappedZkLTC.sol:WrappedZkLTC"
-verify "$POOL" "$ROOT_DIR/src/AyniSolverPool.sol:AyniSolverPool"
+verify "$POOL" "$ROOT_DIR/src/AyniLiquidityPool.sol:AyniLiquidityPool"
 
 echo
 echo "Verification complete."

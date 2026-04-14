@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {AyniDestinationSettler} from "../src/AyniDestinationSettler.sol";
 import {AyniOracle} from "../src/AyniOracle.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
-import {AyniSolverPool} from "../src/AyniSolverPool.sol";
+import {AyniLiquidityPool} from "../src/AyniLiquidityPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
@@ -84,8 +84,8 @@ contract AyniProtocolFuzzTest is TestBase {
     {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
-        AyniSolverPool pool = _deployPool(address(usdc));
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        AyniLiquidityPool pool = _deployPool(address(usdc));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         uint256 collateralAmount = bound(collateralSeed, 1 ether, 10_000 ether);
         uint256 maxLiquidity = 50_000_000e6;
@@ -214,12 +214,12 @@ contract AyniProtocolFuzzTest is TestBase {
         return maxPrincipal;
     }
 
-    function _deployPool(address asset_) internal returns (AyniSolverPool pool) {
-        pool = new AyniSolverPool(asset_, address(protocol), address(this), "Ayni Solver Share", "SWzkltc", _defaultRateModel());
+    function _deployPool(address asset_) internal returns (AyniLiquidityPool pool) {
+        pool = new AyniLiquidityPool(asset_, address(protocol), address(this), "Ayni Liquidity Pool", "SWzkltc", _defaultRateModel());
     }
 
-    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
-        return AyniSolverPool.RateModelConfig({
+    function _defaultRateModel() internal pure returns (AyniLiquidityPool.RateModelConfig memory) {
+        return AyniLiquidityPool.RateModelConfig({
             optimalUtilization: 65 * 1e25,
             baseRate: 3 * 1e25,
             slope1: 12 * 1e25,

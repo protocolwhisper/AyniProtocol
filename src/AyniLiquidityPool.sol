@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {IAyniSolverPool} from "./interfaces/IAyniSolverPool.sol";
+import {IAyniLiquidityPool} from "./interfaces/IAyniLiquidityPool.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IERC20Metadata} from "./interfaces/IERC20Metadata.sol";
 import {Math} from "./utils/Math.sol";
 import {ReentrancyGuard} from "./utils/ReentrancyGuard.sol";
 import {SafeERC20} from "./utils/SafeERC20.sol";
 
-contract AyniSolverPool is IAyniSolverPool, ReentrancyGuard {
+contract AyniLiquidityPool is IAyniLiquidityPool, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 internal constant RAY = 1e27;

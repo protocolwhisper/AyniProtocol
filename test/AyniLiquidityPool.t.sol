@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {AyniDestinationSettler} from "../src/AyniDestinationSettler.sol";
 import {AyniOracle} from "../src/AyniOracle.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
-import {AyniSolverPool} from "../src/AyniSolverPool.sol";
+import {AyniLiquidityPool} from "../src/AyniLiquidityPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
@@ -13,7 +13,7 @@ import {TestBase} from "./TestBase.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
-contract AyniSolverPoolTest is TestBase {
+contract AyniLiquidityPoolTest is TestBase {
     uint256 internal constant COLLATERAL_AMOUNT = 10 ether;
     uint256 internal constant BORROW_AMOUNT = 5_000e6;
     uint256 internal constant LP_DEPOSIT = 20_000e6;
@@ -33,8 +33,8 @@ contract AyniSolverPoolTest is TestBase {
     AyniVault internal implementation;
     AyniVaultRegistry internal registry;
     AyniVaultFactory internal factory;
-    AyniSolverPool internal pool;
-    AyniSolverPool internal usdtPool;
+    AyniLiquidityPool internal pool;
+    AyniLiquidityPool internal usdtPool;
 
     function setUp() public {
         collateral = new MockERC20("Collateral", "COL", 18);
@@ -54,8 +54,8 @@ contract AyniSolverPoolTest is TestBase {
         );
         factory = AyniVaultFactory(protocol.factory_address());
         destinationSettler = new AyniDestinationSettler(address(protocol));
-        pool = _deployPool(address(usdc), "Ayni USDC Solver Share", "SWzkltc");
-        usdtPool = _deployPool(address(usdt), "Ayni USDT Solver Share", "asUSDT");
+        pool = _deployPool(address(usdc), "Ayni USDC Liquidity Pool", "SWzkltc");
+        usdtPool = _deployPool(address(usdt), "Ayni USDT Liquidity Pool", "asUSDT");
 
         registry.set_factory(address(factory));
         factory.set_manager(address(protocol));
@@ -64,7 +64,7 @@ contract AyniSolverPoolTest is TestBase {
 
     function test_pool_fill_partial_repay_grows_share_price() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
         usdc.mint(LP, LP_DEPOSIT);
@@ -102,7 +102,7 @@ contract AyniSolverPoolTest is TestBase {
 
     function test_market_repay_routes_pool_debt_to_lppool() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
         usdc.mint(LP, LP_DEPOSIT);
@@ -133,14 +133,14 @@ contract AyniSolverPoolTest is TestBase {
         assertTrue(pool.convertToAssets(pool.balanceOf(LP)) > LP_DEPOSIT);
     }
 
-    function test_protocol_seed_solver_pool_mints_lp_to_ayni_owner() public {
+    function test_protocol_seed_liquidity_pool_mints_lp_to_ayni_owner() public {
         protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         usdc.mint(address(this), LP_DEPOSIT);
         usdc.approve(address(protocol), type(uint256).max);
 
-        uint256 shares = protocol.seed_solver_pool(address(collateral), address(usdc), LP_DEPOSIT);
+        uint256 shares = protocol.seed_liquidity_pool(address(collateral), address(usdc), LP_DEPOSIT);
 
         assertEq(pool.balanceOf(address(this)), shares);
         assertEq(pool.totalAssets(), LP_DEPOSIT);
@@ -150,7 +150,7 @@ contract AyniSolverPoolTest is TestBase {
     function test_market_borrow_uses_lppool_when_vault_has_no_usdc() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
         usdc.mint(LP, LP_DEPOSIT);
@@ -178,7 +178,7 @@ contract AyniSolverPoolTest is TestBase {
     function test_market_borrow_opens_intent_when_lppool_is_illiquid() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
 
@@ -229,7 +229,7 @@ contract AyniSolverPoolTest is TestBase {
 
     function test_full_pool_repay_releases_collateral() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
         AyniVault vault = AyniVault(vaultAddress);
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
@@ -259,7 +259,7 @@ contract AyniSolverPoolTest is TestBase {
 
     function test_pool_claim_liquidation_sends_collateral_to_liquidator() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
         AyniVault vault = AyniVault(vaultAddress);
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
@@ -314,7 +314,7 @@ contract AyniSolverPoolTest is TestBase {
     }
 
     function test_pool_rate_model_updates_are_delayed() public {
-        assertTrue(keccak256(bytes(pool.name())) == keccak256(bytes("Ayni USDC Solver Share")));
+        assertTrue(keccak256(bytes(pool.name())) == keccak256(bytes("Ayni USDC Liquidity Pool")));
         assertTrue(keccak256(bytes(pool.symbol())) == keccak256(bytes("SWzkltc")));
 
         pool.set_rate_model(70 * 1e25, 4 * 1e25, 10 * 1e25, 180 * 1e25, 20 * 1e25);
@@ -336,11 +336,11 @@ contract AyniSolverPoolTest is TestBase {
         address usdcVault = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         address usdtVault = protocol.create_market(address(collateral), address(usdt), address(oracle), VAULT_OWNER);
 
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
-        protocol.set_solver_pool(address(collateral), address(usdt), address(usdtPool));
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
+        protocol.set_liquidity_pool(address(collateral), address(usdt), address(usdtPool));
 
-        assertEq(protocol.get_solver_pool(address(collateral), address(usdc)), address(pool));
-        assertEq(protocol.get_solver_pool(address(collateral), address(usdt)), address(usdtPool));
+        assertEq(protocol.get_liquidity_pool(address(collateral), address(usdc)), address(pool));
+        assertEq(protocol.get_liquidity_pool(address(collateral), address(usdt)), address(usdtPool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT * 2);
         usdc.mint(LP, LP_DEPOSIT);
@@ -380,9 +380,9 @@ contract AyniSolverPoolTest is TestBase {
 
     function _deployPool(address asset_, string memory name_, string memory symbol_)
         internal
-        returns (AyniSolverPool deployedPool)
+        returns (AyniLiquidityPool deployedPool)
     {
-        deployedPool = new AyniSolverPool(
+        deployedPool = new AyniLiquidityPool(
             asset_,
             address(protocol),
             address(this),
@@ -392,8 +392,8 @@ contract AyniSolverPoolTest is TestBase {
         );
     }
 
-    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
-        return AyniSolverPool.RateModelConfig({
+    function _defaultRateModel() internal pure returns (AyniLiquidityPool.RateModelConfig memory) {
+        return AyniLiquidityPool.RateModelConfig({
             optimalUtilization: 65 * 1e25,
             baseRate: 3 * 1e25,
             slope1: 12 * 1e25,

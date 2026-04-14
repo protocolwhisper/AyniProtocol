@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {AyniOracle} from "../src/AyniOracle.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
-import {AyniSolverPool} from "../src/AyniSolverPool.sol";
+import {AyniLiquidityPool} from "../src/AyniLiquidityPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
@@ -21,7 +21,7 @@ contract AyniVaultInvariantTest is TestBase {
     MockERC20 internal usdc;
     AyniVault internal vault;
     AyniProtocol internal protocol;
-    AyniSolverPool internal pool;
+    AyniLiquidityPool internal pool;
     AyniVaultHandler internal handler;
 
     function setUp() public {
@@ -45,8 +45,8 @@ contract AyniVaultInvariantTest is TestBase {
         factory.set_manager(address(protocol));
 
         vault = AyniVault(protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER));
-        pool = new AyniSolverPool(address(usdc), address(protocol), address(this), "Ayni Solver Share", "SWzkltc", _defaultRateModel());
-        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+        pool = new AyniLiquidityPool(address(usdc), address(protocol), address(this), "Ayni Liquidity Pool", "SWzkltc", _defaultRateModel());
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
 
         usdc.mint(address(this), 100_000_000e6);
         usdc.approve(address(pool), type(uint256).max);
@@ -85,8 +85,8 @@ contract AyniVaultInvariantTest is TestBase {
         assertEq(vault.total_debt(), handler.totalTrackedDebt());
     }
 
-    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
-        return AyniSolverPool.RateModelConfig({
+    function _defaultRateModel() internal pure returns (AyniLiquidityPool.RateModelConfig memory) {
+        return AyniLiquidityPool.RateModelConfig({
             optimalUtilization: 65 * 1e25,
             baseRate: 3 * 1e25,
             slope1: 12 * 1e25,

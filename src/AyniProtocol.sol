@@ -5,7 +5,7 @@ import {IAyniFactory} from "./interfaces/IAyniFactory.sol";
 import {IAyniClaimOrigin} from "./interfaces/IAyniClaimOrigin.sol";
 import {IAyniClaimDebtRouter} from "./interfaces/IAyniClaimDebtRouter.sol";
 import {IAyniRegistry} from "./interfaces/IAyniRegistry.sol";
-import {IAyniSolverPool} from "./interfaces/IAyniSolverPool.sol";
+import {IAyniLiquidityPool} from "./interfaces/IAyniLiquidityPool.sol";
 import {IAyniVaultActions} from "./interfaces/IAyniVaultActions.sol";
 import {IAyniVaultView} from "./interfaces/IAyniVaultView.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
@@ -91,7 +91,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
 
     mapping(bytes32 => DebtPosition) private _debt_positions;
     mapping(address => uint256) private _order_nonce;
-    mapping(address => address) private _solver_pools;
+    mapping(address => address) private _liquidity_pools;
     mapping(bytes32 => address) private _claim_pools;
 
     event MarketCreated(
@@ -99,8 +99,8 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
     );
     event DestinationSettlerUpdated(address indexed old_settler, address indexed new_settler);
     event AdminUpdated(address indexed admin, bool enabled);
-    event SolverPoolUpdated(address indexed vault, address indexed old_pool, address indexed new_pool);
-    event SolverPoolSeeded(address indexed pool, address indexed receiver, uint256 assets, uint256 shares);
+    event LiquidityPoolUpdated(address indexed vault, address indexed old_pool, address indexed new_pool);
+    event LiquidityPoolSeeded(address indexed pool, address indexed receiver, uint256 assets, uint256 shares);
     event ClaimTransferred(bytes32 indexed order_id, address indexed from, address indexed to);
     event ClaimFilled(bytes32 indexed order_id, address indexed solver, address indexed borrower);
     event ClaimCancelled(bytes32 indexed order_id, address indexed borrower);
@@ -198,19 +198,19 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
         emit DestinationSettlerUpdated(old_settler, new_settler);
     }
 
-    function set_solver_pool(address collateral_token, address debt_asset, address new_pool) external onlyAdmin {
+    function set_liquidity_pool(address collateral_token, address debt_asset, address new_pool) external onlyAdmin {
         require(new_pool != address(0), "Protocol: bad pool");
         address vault = _requireMarket(collateral_token, debt_asset);
-        address old_pool = _solver_pools[vault];
-        _solver_pools[vault] = new_pool;
-        emit SolverPoolUpdated(vault, old_pool, new_pool);
+        address old_pool = _liquidity_pools[vault];
+        _liquidity_pools[vault] = new_pool;
+        emit LiquidityPoolUpdated(vault, old_pool, new_pool);
     }
 
-    function get_solver_pool(address collateral_token, address debt_asset) external view returns (address) {
-        return _solver_pools[_requireMarket(collateral_token, debt_asset)];
+    function get_liquidity_pool(address collateral_token, address debt_asset) external view returns (address) {
+        return _liquidity_pools[_requireMarket(collateral_token, debt_asset)];
     }
 
-    function seed_solver_pool(address collateral_token, address debt_asset, uint256 assets)
+    function seed_liquidity_pool(address collateral_token, address debt_asset, uint256 assets)
         external
         onlyAdmin
         nonReentrant
@@ -219,16 +219,16 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
         require(assets > 0, "Protocol: amount=0");
 
         address vault = _requireMarket(collateral_token, debt_asset);
-        address pool = _solver_pools[vault];
-        require(pool != address(0), "Protocol: solver pool unset");
-        require(debt_asset == IAyniSolverPool(pool).asset(), "Protocol: bad pool asset");
+        address pool = _liquidity_pools[vault];
+        require(pool != address(0), "Protocol: liquidity pool unset");
+        require(debt_asset == IAyniLiquidityPool(pool).asset(), "Protocol: bad pool asset");
 
         IERC20(debt_asset).safeTransferFrom(msg.sender, address(this), assets);
         _approveExact(IERC20(debt_asset), pool, assets);
-        shares = IAyniSolverPool(pool).deposit(assets, _owner);
+        shares = IAyniLiquidityPool(pool).deposit(assets, _owner);
         _approveExact(IERC20(debt_asset), pool, 0);
 
-        emit SolverPoolSeeded(pool, _owner, assets, shares);
+        emit LiquidityPoolSeeded(pool, _owner, assets, shares);
     }
 
     function create_market(address collateral_token, address debt_asset, address oracle, address vault_owner)
@@ -302,12 +302,12 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
 
     function borrow(address collateral_token, address debt_asset, uint256 amount) external nonReentrant returns (bytes32 order_id) {
         address vault = _requireMarket(collateral_token, debt_asset);
-        address pool = _solver_pools[vault];
+        address pool = _liquidity_pools[vault];
 
         if (pool != address(0)) {
-            require(debt_asset == IAyniSolverPool(pool).asset(), "Protocol: bad pool asset");
+            require(debt_asset == IAyniLiquidityPool(pool).asset(), "Protocol: bad pool asset");
 
-            if (IAyniSolverPool(pool).availableLiquidity() >= amount) {
+            if (IAyniLiquidityPool(pool).availableLiquidity() >= amount) {
                 return _borrow_from_pool(vault, collateral_token, debt_asset, msg.sender, amount);
             }
         }
@@ -376,11 +376,11 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
         require(position.status == ClaimStatus.OPEN, "Protocol: bad claim");
         require(block.timestamp <= position.fill_deadline, "Protocol: fill expired");
 
-        address pool = _solver_pools[position.vault];
-        require(pool != address(0), "Protocol: solver pool unset");
-        require(position.debt_asset == IAyniSolverPool(pool).asset(), "Protocol: bad pool asset");
+        address pool = _liquidity_pools[position.vault];
+        require(pool != address(0), "Protocol: liquidity pool unset");
+        require(position.debt_asset == IAyniLiquidityPool(pool).asset(), "Protocol: bad pool asset");
 
-        IAyniSolverPool(pool).fundClaim(order_id, position.principal, position.borrower);
+        IAyniLiquidityPool(pool).fundClaim(order_id, position.principal, position.borrower);
         IERC20(position.debt_asset).safeTransfer(position.recipient, position.principal);
         IAyniVaultActions(position.vault).mark_solver_borrow_filled_with_debt(order_id, position.principal);
 
@@ -409,7 +409,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
                 IAyniVaultActions(position.vault).repay_claim_for(order_id, position.borrower, amount);
 
             IERC20(position.debt_asset).safeTransferFrom(payer, recipient, actual_paid);
-            IAyniSolverPool(recipient).settleRepayment(order_id, actual_paid);
+            IAyniLiquidityPool(recipient).settleRepayment(order_id, actual_paid);
 
             if (remaining_debt_after == 0) {
                 position.status = ClaimStatus.REPAID;
@@ -449,7 +449,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
         require(recipient != address(0), "Protocol: no claim holder");
 
         if (recipient == _claim_pools[order_id]) {
-            uint256 debt_to_cover = IAyniSolverPool(recipient).currentDebt(order_id);
+            uint256 debt_to_cover = IAyniLiquidityPool(recipient).currentDebt(order_id);
             require(debt_to_cover > 0, "Protocol: no debt");
 
             position.status = ClaimStatus.LIQUIDATED;
@@ -458,7 +458,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
 
             IERC20(position.debt_asset).safeTransferFrom(msg.sender, recipient, debt_to_cover);
             (uint256 collateral_amount,) = IAyniVaultActions(position.vault).liquidate_pool_claim_for(order_id, msg.sender);
-            IAyniSolverPool(recipient).settleLiquidation(order_id, debt_to_cover);
+            IAyniLiquidityPool(recipient).settleLiquidation(order_id, debt_to_cover);
 
             emit ClaimLiquidated(order_id, msg.sender, collateral_amount, 0);
             return;
@@ -540,7 +540,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
             return (0, false);
         }
 
-        return (IAyniSolverPool(pool).currentDebt(order_id), true);
+        return (IAyniLiquidityPool(pool).currentDebt(order_id), true);
     }
 
     function _borrow_from_pool(address vault, address collateral_token, address debt_asset, address borrower, uint256 amount)
@@ -549,9 +549,9 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
     {
         require(amount > 0, "Protocol: amount=0");
 
-        address pool = _solver_pools[vault];
-        require(pool != address(0), "Protocol: solver pool unset");
-        require(debt_asset == IAyniSolverPool(pool).asset(), "Protocol: bad pool asset");
+        address pool = _liquidity_pools[vault];
+        require(pool != address(0), "Protocol: liquidity pool unset");
+        require(debt_asset == IAyniLiquidityPool(pool).asset(), "Protocol: bad pool asset");
 
         uint256 nonce = _order_nonce[borrower] + 1;
         _order_nonce[borrower] = nonce;
@@ -573,7 +573,7 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
         });
 
         IAyniVaultActions(vault).open_solver_borrow_for(order_id, borrower, amount, amount, block.timestamp + 1, 0);
-        IAyniSolverPool(pool).fundClaim(order_id, amount, borrower);
+        IAyniLiquidityPool(pool).fundClaim(order_id, amount, borrower);
         IERC20(debt_asset).safeTransfer(borrower, amount);
         IAyniVaultActions(vault).mark_solver_borrow_filled_with_debt(order_id, amount);
 
@@ -666,13 +666,13 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
     }
 
     function _availableLiquidity(address vault) internal view returns (uint256) {
-        address pool = _solver_pools[vault];
+        address pool = _liquidity_pools[vault];
 
         if (pool == address(0)) {
             return 0;
         }
 
-        return IAyniSolverPool(pool).availableLiquidity();
+        return IAyniLiquidityPool(pool).availableLiquidity();
     }
 
     function _approveExact(IERC20 token, address spender, uint256 amount) internal {
