@@ -174,28 +174,12 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         _withdraw(msg.sender, amount);
     }
 
-    function record_borrow(uint256 amount) external nonReentrant {
-        _borrow(msg.sender, amount);
-    }
-
     function deposit_for(address user, uint256 amount) external nonReentrant onlyRouter {
         _deposit(user, amount);
     }
 
     function withdraw_for(address user, uint256 amount) external nonReentrant onlyRouter {
         _withdraw(user, amount);
-    }
-
-    function borrow_for(address user, uint256 amount) external nonReentrant onlyRouter {
-        _borrow(user, amount);
-    }
-
-    function repay_for(address user, uint256 amount) external nonReentrant onlyRouter {
-        _repay(user, amount);
-    }
-
-    function repay(uint256 amount) external nonReentrant {
-        _repay(msg.sender, amount);
     }
 
     function open_solver_borrow_for(
@@ -420,73 +404,6 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         emit Withdraw(user, amount);
     }
 
-    function _borrow(address user, uint256 amount) internal {
-        require(!paused, "Vault: paused");
-        require(amount > 0, "amount=0");
-        require(active_solver_order[user] == bytes32(0), "Vault: solver order active");
-
-        _accrue(user);
-
-        uint256 fee = amount * borrow_fee_bps / BPS_DENOMINATOR;
-        uint256 new_debt = positions[user].debt + amount + fee;
-        uint256 col_usd = _collateral_usd(user);
-
-        require(col_usd > 0, "no collateral");
-        require(new_debt * BPS_DENOMINATOR <= col_usd * max_ltv, "exceeds max LTV");
-        require(IERC20(_usdc).balanceOf(address(this)) >= amount, "insufficient liquidity");
-
-        positions[user].debt = new_debt;
-        total_debt += amount + fee;
-        IERC20(_usdc).safeTransfer(user, amount);
-
-        emit BorrowRecorded(user, amount, fee);
-    }
-
-    function _repay(address user, uint256 amount) internal {
-        require(amount > 0, "amount=0");
-
-        bytes32 order_id = active_solver_order[user];
-        if (order_id != bytes32(0) && _solver_orders[order_id].status == SolverBorrowStatus.FILLED) {
-            revert("Vault: use claim repay");
-        }
-
-        _accrue(user);
-
-        uint256 actual = _min(amount, positions[user].debt);
-        require(actual > 0, "no debt");
-
-        positions[user].debt -= actual;
-        total_debt -= actual;
-
-        IERC20(_usdc).safeTransferFrom(user, address(this), actual);
-
-        emit Repay(user, actual);
-    }
-
-    function liquidate(address user, uint256 debt_to_cover) external nonReentrant {
-        require(user != msg.sender, "self liquidation");
-        require(active_solver_order[user] == bytes32(0), "Vault: claim-backed debt");
-
-        _accrue(user);
-
-        require(_health_factor(user) < MIN_HEALTH_FACTOR, "position healthy");
-        require(debt_to_cover > 0, "amount=0");
-        require(debt_to_cover <= positions[user].debt, "too much");
-
-        uint256 collateral_seized = _debtToCollateral(debt_to_cover) * (BPS_DENOMINATOR + liq_penalty) / BPS_DENOMINATOR;
-        collateral_seized = _min(collateral_seized, positions[user].collateral);
-
-        positions[user].debt -= debt_to_cover;
-        positions[user].collateral -= collateral_seized;
-        total_debt -= debt_to_cover;
-        total_collateral -= collateral_seized;
-
-        IERC20(_usdc).safeTransferFrom(msg.sender, address(this), debt_to_cover);
-        IERC20(_collateral_token).safeTransfer(msg.sender, collateral_seized);
-
-        emit Liquidated(user, msg.sender, collateral_seized, debt_to_cover);
-    }
-
     function collateral_asset() external view returns (address) {
         return _collateral_token;
     }
@@ -529,10 +446,6 @@ abstract contract AyniVaultCore is ReentrancyGuard {
 
     function debt_of(address user) external view returns (uint256) {
         return _liveDebt(user);
-    }
-
-    function available_liquidity() external view returns (uint256) {
-        return IERC20(_usdc).balanceOf(address(this));
     }
 
     function solver_order(bytes32 order_id)
@@ -718,12 +631,6 @@ abstract contract AyniVaultCore is ReentrancyGuard {
     function _collateralToDebtValue(uint256 collateral_amount, uint256 price) internal view returns (uint256) {
         return collateral_amount * price * _scaleFactor(debt_decimals) / _scaleFactor(collateral_decimals)
             / _scaleFactor(oracle_decimals);
-    }
-
-    function _debtToCollateral(uint256 debt_amount) internal view returns (uint256) {
-        uint256 price = IAyniOracle(_oracle).get_price();
-        return debt_amount * _scaleFactor(collateral_decimals) * _scaleFactor(oracle_decimals) / price
-            / _scaleFactor(debt_decimals);
     }
 
     function _scheduleRiskParameter(bytes32 parameter, PendingUintChange storage pending_change, uint256 new_value)

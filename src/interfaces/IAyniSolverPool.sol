@@ -18,6 +18,8 @@ interface IAyniSolverPool {
 
     function totalAssets() external view returns (uint256);
 
+    function availableLiquidity() external view returns (uint256);
+
     function convertToShares(uint256 assets) external view returns (uint256);
 
     function convertToAssets(uint256 shares) external view returns (uint256);

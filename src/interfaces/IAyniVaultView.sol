@@ -20,8 +20,6 @@ interface IAyniVaultView {
 
     function debt_of(address user) external view returns (uint256);
 
-    function available_liquidity() external view returns (uint256);
-
     function paused() external view returns (bool);
 
     function total_collateral() external view returns (uint256);

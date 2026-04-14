@@ -159,6 +159,10 @@ contract AyniSolverPool is IAyniSolverPool, ReentrancyGuard {
         return _idleLiquidity() + outstanding;
     }
 
+    function availableLiquidity() external view returns (uint256) {
+        return _idleLiquidity();
+    }
+
     function convertToShares(uint256 assets) public view returns (uint256) {
         uint256 supply = totalSupply;
         uint256 total_assets = totalAssets();

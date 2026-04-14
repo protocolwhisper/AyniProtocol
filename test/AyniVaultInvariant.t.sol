@@ -3,6 +3,7 @@ pragma solidity 0.8.30;
 
 import {AyniOracle} from "../src/AyniOracle.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
+import {AyniSolverPool} from "../src/AyniSolverPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
@@ -19,6 +20,8 @@ contract AyniVaultInvariantTest is TestBase {
     MockERC20 internal collateral;
     MockERC20 internal usdc;
     AyniVault internal vault;
+    AyniProtocol internal protocol;
+    AyniSolverPool internal pool;
     AyniVaultHandler internal handler;
 
     function setUp() public {
@@ -31,7 +34,7 @@ contract AyniVaultInvariantTest is TestBase {
         AyniOracle oracle = new AyniOracle(address(feed), address(this));
         AyniVault implementation = new AyniVault();
         AyniVaultRegistry registry = new AyniVaultRegistry(address(this));
-        AyniProtocol protocol = new AyniProtocol(
+        protocol = new AyniProtocol(
             address(new AyniVaultFactory(address(implementation), address(registry), address(this))),
             address(registry),
             address(this)
@@ -42,9 +45,14 @@ contract AyniVaultInvariantTest is TestBase {
         factory.set_manager(address(protocol));
 
         vault = AyniVault(protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER));
-        usdc.mint(address(vault), 100_000_000e6);
+        pool = new AyniSolverPool(address(usdc), address(protocol), address(this), "Ayni Solver Share", "SWzkltc", _defaultRateModel());
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
 
-        handler = new AyniVaultHandler(vault, collateral, usdc, feed, ALICE, BOB, CAROL);
+        usdc.mint(address(this), 100_000_000e6);
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(100_000_000e6, address(this));
+
+        handler = new AyniVaultHandler(protocol, vault, collateral, usdc, feed, ALICE, BOB, CAROL);
     }
 
     function testFuzz_StatefulVaultAccounting(
@@ -76,11 +84,22 @@ contract AyniVaultInvariantTest is TestBase {
         assertEq(vault.total_collateral(), collateral.balanceOf(address(vault)));
         assertEq(vault.total_debt(), handler.totalTrackedDebt());
     }
+
+    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
+        return AyniSolverPool.RateModelConfig({
+            optimalUtilization: 65 * 1e25,
+            baseRate: 3 * 1e25,
+            slope1: 12 * 1e25,
+            slope2: 150 * 1e25,
+            reserveFactor: 15 * 1e25
+        });
+    }
 }
 
 contract AyniVaultHandler is TestBase {
     uint256 internal constant MAX_COLLATERAL = 1_000 ether;
 
+    AyniProtocol internal immutable protocol;
     AyniVault internal immutable vault;
     MockERC20 internal immutable collateral;
     MockERC20 internal immutable usdc;
@@ -90,6 +109,7 @@ contract AyniVaultHandler is TestBase {
     uint80 internal roundId;
 
     constructor(
+        AyniProtocol protocol_,
         AyniVault vault_,
         MockERC20 collateral_,
         MockERC20 usdc_,
@@ -98,6 +118,7 @@ contract AyniVaultHandler is TestBase {
         address actor1,
         address actor2
     ) {
+        protocol = protocol_;
         vault = vault_;
         collateral = collateral_;
         usdc = usdc_;
@@ -140,20 +161,15 @@ contract AyniVaultHandler is TestBase {
             return;
         }
 
-        uint256 maxPrincipal = maxDebt * 10_000 / (10_000 + vault.borrow_fee_bps());
-        if (maxPrincipal == 0) {
-            return;
-        }
-
-        amount = bound(amount, 1, maxPrincipal);
+        amount = bound(amount, 1, maxDebt);
 
         vm.prank(actor);
-        try vault.record_borrow(amount) {} catch {}
+        try protocol.borrow(address(collateral), address(usdc), amount) {} catch {}
     }
 
     function repay(uint256 actorSeed, uint256 amount) external {
         address actor = _actor(actorSeed);
-        (, uint256 debt,) = vault.positions(actor);
+        uint256 debt = vault.debt_of(actor);
 
         if (debt == 0) {
             return;
@@ -163,8 +179,8 @@ contract AyniVaultHandler is TestBase {
         usdc.mint(actor, amount);
 
         vm.startPrank(actor);
-        usdc.approve(address(vault), type(uint256).max);
-        try vault.repay(amount) {} catch {}
+        usdc.approve(address(protocol), type(uint256).max);
+        try protocol.repay(address(collateral), address(usdc), amount) {} catch {}
         vm.stopPrank();
     }
 

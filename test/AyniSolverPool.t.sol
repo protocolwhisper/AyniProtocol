@@ -19,6 +19,7 @@ contract AyniSolverPoolTest is TestBase {
     uint256 internal constant LP_DEPOSIT = 20_000e6;
     address internal constant USER = address(0xA11CE);
     address internal constant LP = address(0xB0B);
+    address internal constant SOLVER = address(0xCAFE);
     address internal constant LIQUIDATOR = address(0xF1A7);
     address internal constant VAULT_OWNER = address(0xBEEF);
 
@@ -53,7 +54,7 @@ contract AyniSolverPoolTest is TestBase {
         );
         factory = AyniVaultFactory(protocol.factory_address());
         destinationSettler = new AyniDestinationSettler(address(protocol));
-        pool = _deployPool(address(usdc), "Ayni USDC Solver Share", "asUSDC");
+        pool = _deployPool(address(usdc), "Ayni USDC Solver Share", "SWzkltc");
         usdtPool = _deployPool(address(usdt), "Ayni USDT Solver Share", "asUSDT");
 
         registry.set_factory(address(factory));
@@ -97,6 +98,133 @@ contract AyniSolverPoolTest is TestBase {
         assertTrue(pool.reserveBalance() > 0);
         assertTrue(pool.convertToAssets(pool.balanceOf(LP)) > LP_DEPOSIT);
         assertTrue(pool.totalAssets() > LP_DEPOSIT);
+    }
+
+    function test_market_repay_routes_pool_debt_to_lppool() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+        usdc.mint(LP, LP_DEPOSIT);
+        usdc.mint(USER, 2_000e6);
+
+        vm.startPrank(LP);
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(LP_DEPOSIT, LP);
+        vm.stopPrank();
+
+        bytes32 orderId = _openClaim(vaultAddress, address(usdc));
+        protocol.fill_with_pool(orderId);
+
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 debtBefore = pool.currentDebt(orderId);
+        uint256 poolBalanceBefore = usdc.balanceOf(address(pool));
+
+        vm.startPrank(USER);
+        usdc.approve(address(protocol), type(uint256).max);
+        protocol.repay(address(collateral), address(usdc), 1_000e6);
+        vm.stopPrank();
+
+        assertEq(protocol.claim_holder(orderId), address(pool));
+        assertTrue(pool.currentDebt(orderId) < debtBefore);
+        assertEq(usdc.balanceOf(address(pool)), poolBalanceBefore + 1_000e6);
+        assertTrue(pool.reserveBalance() > 0);
+        assertTrue(pool.convertToAssets(pool.balanceOf(LP)) > LP_DEPOSIT);
+    }
+
+    function test_protocol_seed_solver_pool_mints_lp_to_ayni_owner() public {
+        protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+
+        usdc.mint(address(this), LP_DEPOSIT);
+        usdc.approve(address(protocol), type(uint256).max);
+
+        uint256 shares = protocol.seed_solver_pool(address(collateral), address(usdc), LP_DEPOSIT);
+
+        assertEq(pool.balanceOf(address(this)), shares);
+        assertEq(pool.totalAssets(), LP_DEPOSIT);
+        assertEq(usdc.balanceOf(address(pool)), LP_DEPOSIT);
+    }
+
+    function test_market_borrow_uses_lppool_when_vault_has_no_usdc() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        AyniVault vault = AyniVault(vaultAddress);
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+        usdc.mint(LP, LP_DEPOSIT);
+
+        vm.startPrank(LP);
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(LP_DEPOSIT, LP);
+        vm.stopPrank();
+
+        vm.startPrank(USER);
+        collateral.approve(vaultAddress, type(uint256).max);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        protocol.borrow(address(collateral), address(usdc), BORROW_AMOUNT);
+        vm.stopPrank();
+
+        bytes32 orderId = vault.active_solver_order(USER);
+
+        assertTrue(orderId != bytes32(0));
+        assertEq(protocol.claim_holder(orderId), address(pool));
+        assertEq(usdc.balanceOf(USER), BORROW_AMOUNT);
+        assertEq(pool.currentDebt(orderId), BORROW_AMOUNT);
+        assertEq(pool.availableLiquidity(), LP_DEPOSIT - BORROW_AMOUNT);
+    }
+
+    function test_market_borrow_opens_intent_when_lppool_is_illiquid() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        AyniVault vault = AyniVault(vaultAddress);
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+
+        vm.startPrank(USER);
+        collateral.approve(vaultAddress, type(uint256).max);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        bytes32 orderId = protocol.borrow(address(collateral), address(usdc), BORROW_AMOUNT);
+        vm.stopPrank();
+
+        (,,,,,,,,,, uint8 statusBeforeFill) = protocol.get_debt_position(orderId);
+        assertEq(uint256(statusBeforeFill), uint256(AyniProtocol.ClaimStatus.OPEN));
+        assertEq(vault.active_solver_order(USER), orderId);
+        assertEq(protocol.claim_holder(orderId), address(0));
+        assertEq(usdc.balanceOf(USER), 0);
+
+        bytes memory originData =
+            abi.encode(AyniProtocol.FillOriginData({recipient: USER, debt_asset: address(usdc), amount: BORROW_AMOUNT}));
+
+        usdc.mint(SOLVER, 10_000e6);
+        vm.startPrank(SOLVER);
+        usdc.approve(address(destinationSettler), type(uint256).max);
+        destinationSettler.fill(orderId, originData, "");
+        vm.stopPrank();
+
+        assertEq(protocol.claim_holder(orderId), SOLVER);
+        assertEq(usdc.balanceOf(USER), BORROW_AMOUNT);
+        assertEq(pool.currentDebt(orderId), 0);
+
+        uint256 debt = vault.debt_of(USER);
+        uint256 treasuryBefore = usdc.balanceOf(address(this));
+        uint256 solverBefore = usdc.balanceOf(SOLVER);
+        usdc.mint(USER, debt);
+
+        vm.startPrank(USER);
+        usdc.approve(address(protocol), type(uint256).max);
+        protocol.repay(address(collateral), address(usdc), type(uint256).max);
+        vm.stopPrank();
+
+        uint256 treasuryDelta = usdc.balanceOf(address(this)) - treasuryBefore;
+        uint256 solverDelta = usdc.balanceOf(SOLVER) - solverBefore;
+
+        assertEq(protocol.claim_holder(orderId), address(0));
+        assertEq(vault.active_solver_order(USER), bytes32(0));
+        assertEq(collateral.balanceOf(USER), COLLATERAL_AMOUNT);
+        assertEq(treasuryDelta, debt * vault.borrow_fee_bps() / 10_000);
+        assertEq(solverDelta, debt - treasuryDelta);
     }
 
     function test_full_pool_repay_releases_collateral() public {
@@ -187,7 +315,7 @@ contract AyniSolverPoolTest is TestBase {
 
     function test_pool_rate_model_updates_are_delayed() public {
         assertTrue(keccak256(bytes(pool.name())) == keccak256(bytes("Ayni USDC Solver Share")));
-        assertTrue(keccak256(bytes(pool.symbol())) == keccak256(bytes("asUSDC")));
+        assertTrue(keccak256(bytes(pool.symbol())) == keccak256(bytes("SWzkltc")));
 
         pool.set_rate_model(70 * 1e25, 4 * 1e25, 10 * 1e25, 180 * 1e25, 20 * 1e25);
 

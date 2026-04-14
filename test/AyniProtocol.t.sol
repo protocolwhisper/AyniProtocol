@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {AyniOracle} from "../src/AyniOracle.sol";
 import {AyniDestinationSettler} from "../src/AyniDestinationSettler.sol";
 import {AyniProtocol} from "../src/AyniProtocol.sol";
+import {AyniSolverPool} from "../src/AyniSolverPool.sol";
 import {AyniVault} from "../src/AyniVault.sol";
 import {AyniVaultFactory} from "../src/AyniVaultFactory.sol";
 import {AyniVaultRegistry} from "../src/AyniVaultRegistry.sol";
@@ -16,6 +17,7 @@ contract AyniProtocolTest is TestBase {
     uint256 internal constant COLLATERAL_AMOUNT = 10 ether;
     uint256 internal constant BORROW_AMOUNT = 5_000e6;
     address internal constant USER = address(0xA11CE);
+    address internal constant ADMIN = address(0xABCD);
     address internal constant SOLVER = address(0xCAFE);
     address internal constant CLAIM_BUYER = address(0xD00D);
     address internal constant VAULT_OWNER = address(0xBEEF);
@@ -86,36 +88,43 @@ contract AyniProtocolTest is TestBase {
         assertEq(registry.get_vault(address(collateral), address(usdt)), usdtVault);
     }
 
-    function test_vault_borrow_sends_usdc_and_accrues_interest() public {
+    function test_market_borrow_uses_pool_and_repay_releases_collateral() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);
+        AyniSolverPool pool = _deployPool(address(usdc));
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
 
         collateral.mint(USER, COLLATERAL_AMOUNT);
-        usdc.mint(address(vault), 20_000e6);
+        usdc.mint(address(this), 20_000e6);
         usdc.mint(USER, 1_000e6);
 
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(20_000e6, address(this));
+
         vm.startPrank(USER);
-        collateral.approve(address(vault), type(uint256).max);
-        usdc.approve(address(vault), type(uint256).max);
+        collateral.approve(vaultAddress, type(uint256).max);
+        usdc.approve(address(protocol), type(uint256).max);
 
-        vault.deposit(COLLATERAL_AMOUNT);
-        vault.record_borrow(BORROW_AMOUNT);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        protocol.borrow(address(collateral), address(usdc), BORROW_AMOUNT);
 
+        bytes32 orderId = vault.active_solver_order(USER);
         (uint256 depositedCollateral, uint256 debtBeforeInterest,) = vault.positions(USER);
         assertEq(depositedCollateral, COLLATERAL_AMOUNT);
-        assertEq(debtBeforeInterest, 5_025e6);
+        assertEq(debtBeforeInterest, BORROW_AMOUNT);
         assertEq(usdc.balanceOf(USER), 6_000e6);
-        assertEq(vault.available_liquidity(), 15_000e6);
+        assertEq(pool.currentDebt(orderId), BORROW_AMOUNT);
 
         vm.warp(block.timestamp + 365 days);
-        vault.repay(type(uint256).max);
-        vault.withdraw(COLLATERAL_AMOUNT);
+        protocol.repay(address(collateral), address(usdc), type(uint256).max);
         vm.stopPrank();
 
         (uint256 remainingCollateral, uint256 remainingDebt,) = vault.positions(USER);
         assertEq(remainingCollateral, 0);
         assertEq(remainingDebt, 0);
         assertEq(collateral.balanceOf(USER), COLLATERAL_AMOUNT);
+        assertEq(pool.currentDebt(orderId), 0);
+        assertTrue(pool.availableLiquidity() > 20_000e6);
     }
 
     function test_vault_uses_dynamic_decimals() public {
@@ -207,22 +216,46 @@ contract AyniProtocolTest is TestBase {
 
     function test_protocol_routes_market_actions() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        AyniSolverPool pool = _deployPool(address(usdc));
+        protocol.set_solver_pool(address(collateral), address(usdc), address(pool));
+
         collateral.mint(USER, COLLATERAL_AMOUNT);
-        usdc.mint(vaultAddress, 20_000e6);
+        usdc.mint(address(this), 20_000e6);
         usdc.mint(USER, 1_000e6);
+
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(20_000e6, address(this));
 
         vm.startPrank(USER);
         collateral.approve(vaultAddress, type(uint256).max);
-        usdc.approve(vaultAddress, type(uint256).max);
+        usdc.approve(address(protocol), type(uint256).max);
 
         protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
         protocol.borrow(address(collateral), address(usdc), BORROW_AMOUNT);
-        protocol.repay(address(collateral), address(usdc), 6_000e6);
-        protocol.withdraw(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        protocol.repay(address(collateral), address(usdc), type(uint256).max);
         vm.stopPrank();
 
         assertEq(protocol.get_market(address(collateral), address(usdc)), vaultAddress);
-        assertEq(protocol.available_liquidity(address(collateral), address(usdc)), 20_025e6);
+        assertEq(protocol.available_liquidity(address(collateral), address(usdc)), 20_000e6);
+    }
+
+    function test_owner_can_grant_protocol_admin() public {
+        protocol.set_admin(ADMIN, true);
+
+        vm.startPrank(ADMIN);
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        protocol.set_destination_settler(address(destinationSettler));
+        protocol.set_solver_pool(address(collateral), address(usdc), address(0x1234));
+        vm.stopPrank();
+
+        assertEq(protocol.get_market(address(collateral), address(usdc)), vaultAddress);
+        assertEq(protocol.get_solver_pool(address(collateral), address(usdc)), address(0x1234));
+    }
+
+    function test_non_owner_cannot_grant_protocol_admin() public {
+        vm.prank(ADMIN);
+        vm.expectRevert(bytes("Protocol: not owner"));
+        protocol.set_admin(ADMIN, true);
     }
 
     function test_7683_fill_creates_internal_claim_and_routes_repayment() public {
@@ -386,6 +419,20 @@ contract AyniProtocolTest is TestBase {
                     destination_chain_id: block.chainid
                 })
             )
+        });
+    }
+
+    function _deployPool(address asset_) internal returns (AyniSolverPool pool) {
+        pool = new AyniSolverPool(asset_, address(protocol), address(this), "Ayni Solver Share", "SWzkltc", _defaultRateModel());
+    }
+
+    function _defaultRateModel() internal pure returns (AyniSolverPool.RateModelConfig memory) {
+        return AyniSolverPool.RateModelConfig({
+            optimalUtilization: 65 * 1e25,
+            baseRate: 3 * 1e25,
+            slope1: 12 * 1e25,
+            slope2: 150 * 1e25,
+            reserveFactor: 15 * 1e25
         });
     }
 }

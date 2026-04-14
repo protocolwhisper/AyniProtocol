@@ -25,7 +25,9 @@ contract DeployProtocol is ScriptBase {
         address mock_usdc,
         address mock_usdt,
         address usdc_vault,
-        address usdt_vault
+        address usdt_vault,
+        address usdc_solver_pool,
+        address usdt_solver_pool
     );
     event FullStackDeployed(
         address implementation,
@@ -74,7 +76,9 @@ contract DeployProtocol is ScriptBase {
             address mock_usdc,
             address mock_usdt,
             address usdc_vault,
-            address usdt_vault
+            address usdt_vault,
+            address usdc_solver_pool,
+            address usdt_solver_pool
         )
     {
         vm.startBroadcast();
@@ -88,9 +92,25 @@ contract DeployProtocol is ScriptBase {
         usdc_vault = AyniProtocol(deployment.protocol).create_market(collateral, mock_usdc, oracle, owner);
         usdt_vault = AyniProtocol(deployment.protocol).create_market(collateral, mock_usdt, oracle, owner);
 
+        usdc_solver_pool = address(
+            new AyniSolverPool(mock_usdc, deployment.protocol, owner, "Ayni USDC Solver Share", "SWzkltc", _defaultRateModel())
+        );
+        usdt_solver_pool = address(
+            new AyniSolverPool(mock_usdt, deployment.protocol, owner, "Ayni USDT Solver Share", "SWzkltc", _defaultRateModel())
+        );
+
+        AyniProtocol(deployment.protocol).set_solver_pool(collateral, mock_usdc, usdc_solver_pool);
+        AyniProtocol(deployment.protocol).set_solver_pool(collateral, mock_usdt, usdt_solver_pool);
+
         if (initial_mock_liquidity > 0) {
-            MockUSDC(mock_usdc).mint(usdc_vault, initial_mock_liquidity);
-            MockUSDT(mock_usdt).mint(usdt_vault, initial_mock_liquidity);
+            MockUSDC(mock_usdc).mint(owner, initial_mock_liquidity);
+            MockUSDT(mock_usdt).mint(owner, initial_mock_liquidity);
+
+            MockUSDC(mock_usdc).approve(deployment.protocol, initial_mock_liquidity);
+            AyniProtocol(deployment.protocol).seed_solver_pool(collateral, mock_usdc, initial_mock_liquidity);
+
+            MockUSDT(mock_usdt).approve(deployment.protocol, initial_mock_liquidity);
+            AyniProtocol(deployment.protocol).seed_solver_pool(collateral, mock_usdt, initial_mock_liquidity);
         }
 
         vm.stopBroadcast();
@@ -104,7 +124,9 @@ contract DeployProtocol is ScriptBase {
             mock_usdc,
             mock_usdt,
             usdc_vault,
-            usdt_vault
+            usdt_vault,
+            usdc_solver_pool,
+            usdt_solver_pool
         );
     }
 
@@ -138,7 +160,60 @@ contract DeployProtocol is ScriptBase {
                 core.protocol,
                 owner,
                 string(abi.encodePacked("Ayni ", asset_symbol, " Solver Share")),
-                string(abi.encodePacked("as", asset_symbol)),
+                "SWzkltc",
+                _defaultRateModel()
+            )
+        );
+
+        AyniProtocol(core.protocol).set_solver_pool(deployment.wrapped_zkltc, debt_asset, deployment.solver_pool);
+
+        vm.stopBroadcast();
+
+        emit FullStackDeployed(
+            deployment.implementation,
+            deployment.registry,
+            deployment.factory,
+            deployment.protocol,
+            deployment.destination_settler,
+            deployment.wrapped_zkltc,
+            deployment.oracle,
+            deployment.solver_pool,
+            deployment.market_vault
+        );
+    }
+
+    function runFullWithOracle(address owner, address debt_asset, address oracle_)
+        external
+        returns (FullStackDeployment memory deployment)
+    {
+        require(debt_asset != address(0), "Deploy: bad debt asset");
+        require(oracle_ != address(0), "Deploy: bad oracle");
+        require(oracle_.code.length > 0, "Deploy: bad oracle");
+
+        vm.startBroadcast();
+
+        CoreDeployment memory core = _deployCore(owner);
+        deployment.implementation = core.implementation;
+        deployment.registry = core.registry;
+        deployment.factory = core.factory;
+        deployment.protocol = core.protocol;
+
+        deployment.destination_settler = address(new AyniDestinationSettler(core.protocol));
+        AyniProtocol(core.protocol).set_destination_settler(deployment.destination_settler);
+
+        deployment.wrapped_zkltc = address(new WrappedZkLTC());
+        deployment.oracle = oracle_;
+        deployment.market_vault =
+            AyniProtocol(core.protocol).create_market(deployment.wrapped_zkltc, debt_asset, deployment.oracle, owner);
+
+        string memory asset_symbol = IERC20Metadata(debt_asset).symbol();
+        deployment.solver_pool = address(
+            new AyniSolverPool(
+                debt_asset,
+                core.protocol,
+                owner,
+                string(abi.encodePacked("Ayni ", asset_symbol, " Solver Share")),
+                "SWzkltc",
                 _defaultRateModel()
             )
         );
