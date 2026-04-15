@@ -239,6 +239,33 @@ abstract contract AyniVaultCore is ReentrancyGuard {
         _markSolverBorrowFilled(order_id, debt_amount);
     }
 
+    function increase_solver_borrow_for(bytes32 order_id, address user, uint256 debt_increase)
+        external
+        nonReentrant
+        onlyRouter
+    {
+        require(!paused, "Vault: paused");
+        require(debt_increase > 0, "amount=0");
+
+        SolverBorrowOrder storage order = _solver_orders[order_id];
+        require(order.borrower == user, "Vault: bad borrower");
+        require(order.status == SolverBorrowStatus.FILLED, "Vault: bad order");
+
+        _accrue(user);
+
+        require(active_solver_order[user] == order_id, "Vault: inactive order");
+
+        uint256 next_debt = positions[user].debt + debt_increase;
+        require(_health_factor_after(positions[user].collateral, next_debt) >= MIN_HEALTH_FACTOR, "would undercollateralize");
+
+        positions[user].debt = next_debt;
+        total_debt += debt_increase;
+        order.principal += debt_increase;
+        order.debt_amount += debt_increase;
+
+        emit BorrowRecorded(user, debt_increase, 0);
+    }
+
     function _markSolverBorrowFilled(bytes32 order_id, uint256 debt_amount) internal {
         SolverBorrowOrder storage order = _solver_orders[order_id];
         require(order.status == SolverBorrowStatus.OPEN, "Vault: bad order");

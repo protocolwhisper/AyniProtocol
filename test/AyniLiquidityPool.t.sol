@@ -175,6 +175,58 @@ contract AyniLiquidityPoolTest is TestBase {
         assertEq(pool.availableLiquidity(), LP_DEPOSIT - BORROW_AMOUNT);
     }
 
+    function test_market_borrow_top_up_reuses_filled_pool_order() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        AyniVault vault = AyniVault(vaultAddress);
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+        usdc.mint(LP, LP_DEPOSIT);
+
+        vm.startPrank(LP);
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(LP_DEPOSIT, LP);
+        vm.stopPrank();
+
+        vm.startPrank(USER);
+        collateral.approve(vaultAddress, type(uint256).max);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        bytes32 firstOrderId = protocol.borrow(address(collateral), address(usdc), BORROW_AMOUNT);
+        bytes32 secondOrderId = protocol.borrow(address(collateral), address(usdc), 2_000e6);
+        vm.stopPrank();
+
+        (, uint256 debt,) = vault.positions(USER);
+
+        assertEq(secondOrderId, firstOrderId);
+        assertEq(vault.active_solver_order(USER), firstOrderId);
+        assertEq(protocol.claim_holder(firstOrderId), address(pool));
+        assertEq(usdc.balanceOf(USER), BORROW_AMOUNT + 2_000e6);
+        assertEq(pool.currentDebt(firstOrderId), BORROW_AMOUNT + 2_000e6);
+        assertEq(debt, BORROW_AMOUNT + 2_000e6);
+    }
+
+    function test_market_borrow_top_up_reverts_when_it_would_breach_ltv() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+        protocol.set_liquidity_pool(address(collateral), address(usdc), address(pool));
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+        usdc.mint(LP, 30_000e6);
+
+        vm.startPrank(LP);
+        usdc.approve(address(pool), type(uint256).max);
+        pool.deposit(30_000e6, LP);
+        vm.stopPrank();
+
+        vm.startPrank(USER);
+        collateral.approve(vaultAddress, type(uint256).max);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        protocol.borrow(address(collateral), address(usdc), 14_000e6);
+
+        vm.expectRevert(bytes("would undercollateralize"));
+        protocol.borrow(address(collateral), address(usdc), 3_000e6);
+        vm.stopPrank();
+    }
+
     function test_market_borrow_opens_intent_when_lppool_is_illiquid() public {
         address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
         AyniVault vault = AyniVault(vaultAddress);

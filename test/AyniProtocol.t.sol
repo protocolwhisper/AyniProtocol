@@ -239,6 +239,21 @@ contract AyniProtocolTest is TestBase {
         assertEq(protocol.available_liquidity(address(collateral), address(usdc)), 20_000e6);
     }
 
+    function test_borrow_reverts_while_solver_order_is_open() public {
+        address vaultAddress = protocol.create_market(address(collateral), address(usdc), address(oracle), VAULT_OWNER);
+
+        collateral.mint(USER, COLLATERAL_AMOUNT);
+
+        vm.startPrank(USER);
+        collateral.approve(vaultAddress, type(uint256).max);
+        protocol.deposit(address(collateral), address(usdc), COLLATERAL_AMOUNT);
+        protocol.borrow(address(collateral), address(usdc), BORROW_AMOUNT);
+
+        vm.expectRevert(bytes("Vault: solver order active"));
+        protocol.borrow(address(collateral), address(usdc), 1_000e6);
+        vm.stopPrank();
+    }
+
     function test_owner_can_grant_protocol_admin() public {
         protocol.set_admin(ADMIN, true);
 

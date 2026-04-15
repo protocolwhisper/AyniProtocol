@@ -86,6 +86,7 @@ contract AyniLiquidityPool is IAyniLiquidityPool, ReentrancyGuard {
     event Deposit(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed caller, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
     event ClaimFunded(bytes32 indexed orderId, uint256 principal, address borrower);
+    event ClaimIncreased(bytes32 indexed orderId, uint256 principalIncrease, uint256 totalPrincipal);
     event ClaimPartiallyRepaid(
         bytes32 indexed orderId, uint256 principalPaid, uint256 interestPaid, uint256 remainingPrincipal
     );
@@ -374,6 +375,29 @@ contract AyniLiquidityPool is IAyniLiquidityPool, ReentrancyGuard {
         _asset.safeTransfer(protocol, principal);
 
         emit ClaimFunded(orderId, principal, borrower);
+    }
+
+    function increaseClaim(bytes32 orderId, uint256 principalIncrease) external onlyProtocol nonReentrant {
+        require(orderId != bytes32(0), "Pool: bad order");
+        require(principalIncrease > 0, "Pool: amount=0");
+
+        LoanRecord storage loan = loans[orderId];
+        require(loan.active, "Pool: not active");
+
+        _updateIndexAndRate();
+        require(principalIncrease <= _idleLiquidity(), "Pool: insufficient idle");
+
+        uint256 scaledIncrease = Math.mulDiv(principalIncrease, RAY, liquidityIndex);
+        require(scaledIncrease > 0, "Pool: zero debt");
+
+        loan.scaledPrincipal += scaledIncrease;
+        loan.rawPrincipal += principalIncrease;
+        totalScaledDebt += scaledIncrease;
+        totalPrincipalOut += principalIncrease;
+
+        _asset.safeTransfer(protocol, principalIncrease);
+
+        emit ClaimIncreased(orderId, principalIncrease, loan.rawPrincipal);
     }
 
     function settleRepayment(bytes32 orderId, uint256 amount) external onlyProtocol nonReentrant {
