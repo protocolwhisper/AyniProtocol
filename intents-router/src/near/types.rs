@@ -40,14 +40,11 @@ pub struct NearQuoteResult {
     pub expiration_time: Option<String>,
 }
 
-/// Incoming WebSocket message types from the Message Bus.
+/// Generic WebSocket message envelope emitted by the Message Bus.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "method", rename_all = "snake_case")]
-pub enum WsIncoming {
-    /// A user's quote request broadcast to all subscribed solvers
-    Quote { params: NearQuoteRequest },
-    /// Settlement notification (intent matched/filled)
-    QuoteStatus { params: serde_json::Value },
+pub struct WsIncoming {
+    pub method: String,
+    pub params: serde_json::Value,
 }
 
 /// A quote request forwarded from the Message Bus to solvers.
@@ -56,7 +53,9 @@ pub struct NearQuoteRequest {
     pub quote_id: String,
     pub defuse_asset_identifier_in: String,
     pub defuse_asset_identifier_out: String,
+    #[serde(alias = "exact_amount_in")]
     pub amount_in: Option<String>,
+    #[serde(alias = "exact_amount_out")]
     pub amount_out: Option<String>,
     pub min_deadline_ms: u64,
 }

@@ -375,6 +375,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "anyhow",
+ "base64",
  "dotenvy",
  "futures-util",
  "hex",

@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Hex encoding (matches oracle pattern)
 hex = "0.4"
+base64 = "0.22"
 
 [dev-dependencies]
 serial_test = "3"

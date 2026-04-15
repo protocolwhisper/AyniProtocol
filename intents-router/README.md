@@ -30,7 +30,8 @@ cp .env.example .env
 # 3. Edit .env — at minimum set:
 #    RPC_URL              = your LiteForge RPC endpoint
 #    AYNI_PROTOCOL_ADDRESS = deployed contract address
-#    NEAR_INTENTS_API_KEY  = your JWT (optional but recommended)
+#    NEAR_INTENTS_API_KEY     = distribution-channel JWT for /rpc quote requests
+#    NEAR_SOLVER_BUS_API_KEY  = solver JWT for WebSocket subscribe stream
 #    TOKEN_MAP_JSON        = EVM→NEAR token address mapping (optional)
 
 # 4. Build
@@ -69,6 +70,7 @@ Each new borrow intent logs:
 | `POLL_INTERVAL_SECS` | No | `5` | Seconds between `eth_getLogs` calls |
 | `START_BLOCK` | No | `0` | Block to start scanning from on first run (`0` = latest − 100) |
 | `NEAR_INTENTS_API_KEY` | No | — | JWT from partners.near-intents.org |
+| `NEAR_SOLVER_BUS_API_KEY` | No | — | Solver JWT for Message Bus WebSocket (`/ws`) |
 | `NEAR_INTENTS_RPC` | No | Solver relay URL | NEAR Message Bus JSON-RPC endpoint |
 | `NEAR_INTENTS_WS` | No | Solver relay WSS URL | NEAR Message Bus WebSocket endpoint |
 | `TOKEN_MAP_JSON` | No | `{}` | JSON map of EVM hex address → NEAR `nep141:` identifier |

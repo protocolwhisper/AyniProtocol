@@ -13,6 +13,7 @@ pub struct Config {
 
     // NEAR Intents
     pub near_intents_api_key: Option<String>,
+    pub near_solver_bus_api_key: Option<String>,
     pub near_intents_rpc: String,
     pub near_intents_ws: String,
     /// EVM hex address (lowercase, no 0x) → NEAR nep141 identifier
@@ -40,6 +41,9 @@ impl Config {
         let start_block = env_u64("START_BLOCK", 0)?;
 
         let near_intents_api_key = env::var("NEAR_INTENTS_API_KEY").ok().filter(|s| !s.is_empty());
+        let near_solver_bus_api_key = env::var("NEAR_SOLVER_BUS_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         let near_intents_rpc = env::var("NEAR_INTENTS_RPC")
             .unwrap_or_else(|_| "https://solver-relay-v2.chaindefuser.com/rpc".into());
         let near_intents_ws = env::var("NEAR_INTENTS_WS")
@@ -65,6 +69,7 @@ impl Config {
             poll_interval_secs,
             start_block,
             near_intents_api_key,
+            near_solver_bus_api_key,
             near_intents_rpc,
             near_intents_ws,
             token_map,
