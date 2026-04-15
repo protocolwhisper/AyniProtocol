@@ -303,9 +303,24 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
     function borrow(address collateral_token, address debt_asset, uint256 amount) external nonReentrant returns (bytes32 order_id) {
         address vault = _requireMarket(collateral_token, debt_asset);
         address pool = _liquidity_pools[vault];
+        bytes32 active_order_id = IAyniVaultView(vault).active_solver_order(msg.sender);
 
         if (pool != address(0)) {
             require(debt_asset == IAyniLiquidityPool(pool).asset(), "Protocol: bad pool asset");
+
+            if (active_order_id != bytes32(0)) {
+                DebtPosition storage position = _debt_positions[active_order_id];
+                if (
+                    position.borrower == msg.sender && position.status == ClaimStatus.FILLED
+                        && claim_holder[active_order_id] == pool
+                ) {
+                    if (IAyniLiquidityPool(pool).availableLiquidity() >= amount) {
+                        return _borrow_more_from_pool(vault, pool, active_order_id, msg.sender, amount);
+                    }
+
+                    revert("Protocol: insufficient pool liquidity");
+                }
+            }
 
             if (IAyniLiquidityPool(pool).availableLiquidity() >= amount) {
                 return _borrow_from_pool(vault, collateral_token, debt_asset, msg.sender, amount);
@@ -583,6 +598,31 @@ contract AyniProtocol is IOriginSettler, IAyniClaimOrigin, IAyniClaimDebtRouter,
         _debt_positions[order_id].status = ClaimStatus.FILLED;
 
         emit ClaimFilled(order_id, pool, borrower);
+    }
+
+    function _borrow_more_from_pool(address vault, address pool, bytes32 order_id, address borrower, uint256 amount)
+        internal
+        returns (bytes32)
+    {
+        require(amount > 0, "Protocol: amount=0");
+        require(pool != address(0), "Protocol: liquidity pool unset");
+
+        DebtPosition storage position = _debt_positions[order_id];
+        require(position.vault == vault, "Protocol: bad claim");
+        require(position.borrower == borrower, "Protocol: bad borrower");
+        require(position.status == ClaimStatus.FILLED, "Protocol: bad claim");
+        require(claim_holder[order_id] == pool, "Protocol: no pool debt");
+        require(_claim_pools[order_id] == pool, "Protocol: no pool debt");
+        require(position.debt_asset == IAyniLiquidityPool(pool).asset(), "Protocol: bad pool asset");
+        require(IAyniLiquidityPool(pool).availableLiquidity() >= amount, "Protocol: insufficient pool liquidity");
+
+        IAyniVaultActions(vault).increase_solver_borrow_for(order_id, borrower, amount);
+        IAyniLiquidityPool(pool).increaseClaim(order_id, amount);
+        IERC20(position.debt_asset).safeTransfer(borrower, amount);
+
+        position.principal += amount;
+
+        return order_id;
     }
 
     function _open_borrow_intent(address vault, address collateral_token, address debt_asset, address borrower, uint256 amount)

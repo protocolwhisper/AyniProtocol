@@ -44,6 +44,8 @@ interface IAyniLiquidityPool {
 
     function fundClaim(bytes32 orderId, uint256 principal, address borrower) external;
 
+    function increaseClaim(bytes32 orderId, uint256 principalIncrease) external;
+
     function settleRepayment(bytes32 orderId, uint256 amount) external;
 
     function settleLiquidation(bytes32 orderId, uint256 usdcRecovered) external;
