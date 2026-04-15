@@ -5,3 +5,4 @@
 /oracle/.env
 /oracle/target/
 /oracle/generated-owner.json
+plugins/

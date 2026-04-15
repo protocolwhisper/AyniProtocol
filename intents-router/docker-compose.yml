@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  intents-router:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ayni-intents-router:latest
+    restart: unless-stopped
+    env_file:
+      - .env          # copy from .env.example and fill in values
+    volumes:
+      # Block cursor is persisted here across restarts and upgrades
+      - intents-router-data:/app/data
+    ports:
+      - "8080:8080"   # health endpoint; remove if not needed externally
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  intents-router-data:
