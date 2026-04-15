@@ -5,5 +5,7 @@
 /oracle/.env
 /oracle/target/
 /oracle/generated-owner.json
+/intents-bot-solver/.env
+/intents-bot-solver/target/
 plugins/
 .claude/
