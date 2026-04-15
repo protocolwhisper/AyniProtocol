@@ -1,0 +1,16 @@
+[package]
+name = "ayni-intents-bot-solver"
+version = "0.1.0"
+edition = "2021"
+description = "Testnet bot that fulfills AyniProtocol borrow intents directly"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+dotenvy = "0.15"
+ethers = { version = "2.0", default-features = false, features = ["abigen", "rustls", "ws"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

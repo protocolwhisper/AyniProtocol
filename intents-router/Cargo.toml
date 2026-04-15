@@ -1,0 +1,47 @@
+[package]
+name = "ayni-intents-router"
+version = "0.1.0"
+edition = "2021"
+description = "Off-chain relay that monitors AyniProtocol intents and publishes them to the NEAR Intents solver network"
+
+[dependencies]
+# Error handling
+anyhow    = "1.0"
+thiserror = "1.0"
+
+# Env / config (matches oracle pattern)
+dotenvy = "0.15"
+
+# Async runtime
+tokio = { version = "1.38", features = ["full"] }
+
+# EVM ABI / primitive types (lightweight; no alloy-consensus dep)
+alloy-primitives = { version = "0.8", features = ["serde"] }
+alloy-sol-types  = { version = "0.8", features = ["json"] }
+
+# HTTP client (matches oracle pattern)
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# WebSocket for NEAR Message Bus
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+
+# Serialization (matches oracle pattern)
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Hex encoding (matches oracle pattern)
+hex = "0.4"
+base64 = "0.22"
+
+[dev-dependencies]
+serial_test = "3"
+tempfile = "3"
+wiremock = "0.6"
