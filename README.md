@@ -2,6 +2,8 @@
 
 Solidity + Foundry version of the protocol contracts.
 
+Documentation lives under `docs/` (start at `docs/README.md`).
+
 For a full architecture and flow explainer, see [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md).
 
 ## Stack
